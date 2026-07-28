@@ -10,6 +10,7 @@ Prompt-tabanlı veri ambarı analisti: kullanıcı doğal dilde sorar, agent şe
 - Chat UI + etkileşimli şema (ER) görünümü
 - Trend raporlarında çizgi grafik; kompakt LLM payload (ham dump yok)
 - Python MCP sunucusu (`mcp_server`) ve paylaşılan `dwh_core` (şema / validate / report)
+- Cursor / IDE’ye zorunlu bağımlılık yok; uygulama bağımsız çalışır
 
 ## Mimari
 
@@ -20,7 +21,7 @@ Browser (public/)
       → Tools (probe / report / schema) → SQLite DWH
 ```
 
-Paralel olarak `mcp_server` aynı DWH yeteneklerini MCP tool yüzeyi olarak sunar.
+İsteğe bağlı olarak `mcp_server` aynı DWH yeteneklerini bağımsız bir MCP tool yüzeyi olarak sunar (herhangi bir MCP client ile).
 
 ## Gereksinimler
 
@@ -64,12 +65,13 @@ php -S localhost:8080 router.php
 - Sohbet: http://localhost:8080  
 - Şema haritası: http://localhost:8080/schema.html  
 
-6. MCP sunucusu (isteğe bağlı):
+6. MCP sunucusu (isteğe bağlı, bağımsız servis):
 
 ```bash
 python -m mcp_server.server
 ```
 
+Bu adım web sohbeti için zorunlu değildir. MCP istemcisi kullanan ekipler tool yüzeyini buradan bağlayabilir.
 ## Ana dizinler
 
 | Yol | Açıklama |
