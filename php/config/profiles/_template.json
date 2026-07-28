@@ -1,0 +1,25 @@
+{
+  "id": "my_dataset",
+  "display_name": "Yeni veri setim",
+  "description": "İnce profil. Tablolar/joinler boş bırakılırsa SQLite'tan otomatik keşfedilir.",
+  "sqlite": "Data/my_dataset.sqlite",
+  "auto_discover": true,
+  "allowed_tables": [],
+  "joins": [],
+  "metrics": [],
+  "calendar": {
+    "fact_table": "",
+    "date_column": "",
+    "min_rows_per_month": 1
+  },
+  "aliases": [],
+  "defaults": {
+    "status_filter_sql": "",
+    "primary_metric_note": ""
+  },
+  "prompt": {
+    "system_fragment": "Domain: custom SQLite DWH (auto-discovered schema). Answer in Turkish.",
+    "ui_examples": ["Bu ayki özet nasıl?", "İlk 20 satırı göster"],
+    "ui_subtitle": "Özel veri seti"
+  }
+}

@@ -54,8 +54,18 @@ final class ReportTool
         string $reportType = 'table',
         string $reportId = 'report',
         string $title = 'Report',
-        ?int $maxRows = 40
+        ?int $maxRows = null
     ): array {
+        $reportType = strtolower(trim($reportType));
+        if ($reportType === '') {
+            $reportType = 'table';
+        }
+
+        // Browse/raw listings need a higher UI cap; analytics stay modest by default.
+        if ($maxRows === null) {
+            $maxRows = $reportType === 'browse' ? 100 : 40;
+        }
+
         $result = $this->executeQuery($sql, $maxRows);
         if (!$result['ok']) {
             return $result;
@@ -120,7 +130,6 @@ final class ReportTool
             }
         }
 
-        // KPI fallback from first row aggregates / single-row
         if ($kpi === [] && count($rows) === 1) {
             foreach ($rows[0] as $k => $v) {
                 if (is_numeric($v)) {
@@ -129,21 +138,33 @@ final class ReportTool
             }
         }
 
+        $uiRowCap = match ($reportType) {
+            'browse' => 100,
+            'trend' => 24,
+            'kpi' => 5,
+            default => 40,
+        };
+        $delivery = $reportType === 'browse' || ($reportType === 'table' && count($rows) > 25)
+            ? 'ui_only'
+            : 'summary';
+
         return [
             'ok' => true,
             'report_id' => $reportId,
             'report_type' => $reportType,
             'title' => $title,
-            'kpi' => array_slice($kpi, 0, 6),
+            'delivery' => $delivery,
+            'kpi' => array_slice($kpi, 0, 8),
             'series' => $series,
             'table' => [
                 'columns' => $columns,
-                'rows' => array_slice($rows, 0, 12),
+                'rows' => array_slice($rows, 0, $uiRowCap),
             ],
             'numeric_stats' => $numericStats,
             'meta' => [
                 'row_count' => $result['row_count'],
                 'truncated' => $result['truncated'],
+                'max_rows' => $result['max_rows'] ?? $maxRows,
                 'warnings' => $result['warnings'] ?? [],
             ],
         ];

@@ -1,0 +1,205 @@
+{
+  "id": "olist",
+  "display_name": "Olist e-ticaret (Brezilya)",
+  "description": "Olist Brazilian e-commerce star schema (orders, items, customers, products).",
+  "sqlite": "Data/olist_dwh.sqlite",
+  "auto_discover": true,
+  "locale": "tr",
+  "allowed_tables": [
+    "dim_customer",
+    "dim_product",
+    "dim_seller",
+    "dim_geolocation",
+    "fact_orders",
+    "fact_order_items",
+    "fact_order_payments",
+    "fact_order_reviews"
+  ],
+  "joins": [
+    {
+      "id": "orders_customer",
+      "left_table": "fact_orders",
+      "right_table": "dim_customer",
+      "left_key": "customer_id",
+      "right_key": "customer_id",
+      "cardinality": "N:1",
+      "description": "Sipariş → müşteri"
+    },
+    {
+      "id": "items_orders",
+      "left_table": "fact_order_items",
+      "right_table": "fact_orders",
+      "left_key": "order_id",
+      "right_key": "order_id",
+      "cardinality": "N:1",
+      "description": "Kalem → sipariş"
+    },
+    {
+      "id": "items_product",
+      "left_table": "fact_order_items",
+      "right_table": "dim_product",
+      "left_key": "product_id",
+      "right_key": "product_id",
+      "cardinality": "N:1",
+      "description": "Kalem → ürün"
+    },
+    {
+      "id": "items_seller",
+      "left_table": "fact_order_items",
+      "right_table": "dim_seller",
+      "left_key": "seller_id",
+      "right_key": "seller_id",
+      "cardinality": "N:1",
+      "description": "Kalem → satıcı"
+    },
+    {
+      "id": "payments_orders",
+      "left_table": "fact_order_payments",
+      "right_table": "fact_orders",
+      "left_key": "order_id",
+      "right_key": "order_id",
+      "cardinality": "N:1",
+      "description": "Ödeme → sipariş"
+    },
+    {
+      "id": "reviews_orders",
+      "left_table": "fact_order_reviews",
+      "right_table": "fact_orders",
+      "left_key": "order_id",
+      "right_key": "order_id",
+      "cardinality": "N:1",
+      "description": "Yorum → sipariş"
+    },
+    {
+      "id": "customer_geo",
+      "left_table": "dim_customer",
+      "right_table": "dim_geolocation",
+      "left_key": "customer_zip_code_prefix",
+      "right_key": "zip_code_prefix",
+      "cardinality": "N:1",
+      "description": "Müşteri zip → konum"
+    },
+    {
+      "id": "seller_geo",
+      "left_table": "dim_seller",
+      "right_table": "dim_geolocation",
+      "left_key": "seller_zip_code_prefix",
+      "right_key": "zip_code_prefix",
+      "cardinality": "N:1",
+      "description": "Satıcı zip → konum"
+    }
+  ],
+  "metrics": [
+    {
+      "id": "order_count",
+      "name": "Sipariş adedi",
+      "expression": "COUNT(DISTINCT fact_orders.order_id)",
+      "grain": "order",
+      "description": "Benzersiz sipariş sayısı"
+    },
+    {
+      "id": "gmv",
+      "name": "GMV / ciro",
+      "expression": "SUM(fact_order_items.price)",
+      "grain": "order_item",
+      "description": "Kalem fiyatları toplamı (kargo hariç)"
+    },
+    {
+      "id": "freight_total",
+      "name": "Toplam kargo",
+      "expression": "SUM(fact_order_items.freight_value)",
+      "grain": "order_item",
+      "description": "Kargo tutarı toplamı"
+    },
+    {
+      "id": "avg_delivery_days",
+      "name": "Ort. teslimat günü",
+      "expression": "AVG(julianday(fact_orders.order_delivered_customer_date) - julianday(fact_orders.order_purchase_timestamp))",
+      "grain": "order",
+      "description": "Teslim edilen siparişlerde ortalama gün"
+    },
+    {
+      "id": "avg_review_score",
+      "name": "Ort. yorum skoru",
+      "expression": "AVG(fact_order_reviews.review_score)",
+      "grain": "review",
+      "description": "Ortalama review_score"
+    },
+    {
+      "id": "payment_value",
+      "name": "Ödeme tutarı",
+      "expression": "SUM(fact_order_payments.payment_value)",
+      "grain": "payment",
+      "description": "Ödeme tutarı toplamı"
+    }
+  ],
+  "table_descriptions": {
+    "dim_customer": "Müşteri boyutu: id, unique id, zip, şehir, eyalet (customer_state)",
+    "dim_product": "Ürün boyutu: kategori PT/EN, boyut/ağırlık",
+    "dim_seller": "Satıcı boyutu: zip, şehir, eyalet",
+    "dim_geolocation": "Zip başına özet lat/lng/şehir/eyalet",
+    "fact_orders": "Sipariş fact: status, satın alma/teslim tarihleri, customer_id",
+    "fact_order_items": "Sipariş kalemi: price, freight, product_id, seller_id",
+    "fact_order_payments": "Ödeme: tip, taksit, tutar",
+    "fact_order_reviews": "Yorum: skor, metin, tarihler"
+  },
+  "filter_hints": [
+    {"field": "dim_customer.customer_state", "label": "Eyalet (örn. SP, RJ, MG)", "example": "SP"},
+    {"field": "dim_customer.customer_city", "label": "Şehir", "example": "sao paulo"},
+    {"field": "dim_product.category_name_english", "label": "Kategori (EN)", "example": "health_beauty"},
+    {"field": "fact_orders.order_status", "label": "Sipariş durumu", "example": "delivered"},
+    {"field": "fact_orders.order_purchase_timestamp", "label": "Satın alma tarihi", "example": "2018-01-01 .. 2018-01-31"},
+    {"field": "fact_order_payments.payment_type", "label": "Ödeme tipi", "example": "credit_card"}
+  ],
+  "calendar": {
+    "fact_table": "fact_orders",
+    "date_column": "order_purchase_timestamp",
+    "min_rows_per_month": 200,
+    "fallback_min": "2016-09-04",
+    "fallback_max": "2018-10-17"
+  },
+  "defaults": {
+    "status_filter_sql": "fact_orders.order_status = 'delivered'",
+    "primary_metric_id": "gmv",
+    "primary_metric_note": "GMV = SUM(fact_order_items.price); also COUNT(DISTINCT fact_orders.order_id)",
+    "preferred_join_ids": ["orders_customer", "items_orders"],
+    "avoid_join_note": "Never join items+payments for GMV (fan-out)."
+  },
+  "aliases": [
+    {
+      "patterns": ["são paulo", "sao paulo", "\\bsp\\b"],
+      "label": "São Paulo / SP",
+      "sql": "dim_customer.customer_state = 'SP'"
+    },
+    {
+      "patterns": ["rio de janeiro", "\\brio\\b", "\\brj\\b"],
+      "label": "Rio / RJ",
+      "sql": "dim_customer.customer_state = 'RJ'"
+    }
+  ],
+  "intent_table_map": [
+    {"pattern": "customer|müşteri|eyalet|state|şehir|city|yeni|eski", "tables": ["dim_customer", "fact_orders"]},
+    {"pattern": "product|ürün|kategori|category|telefon|renk|model", "tables": ["dim_product", "fact_order_items"]},
+    {"pattern": "seller|satıcı", "tables": ["dim_seller", "fact_order_items"]},
+    {"pattern": "geo|konum|zip|lat", "tables": ["dim_geolocation", "dim_customer"]},
+    {"pattern": "order|sipariş|trend|satış|gmv|ciro", "tables": ["fact_orders", "fact_order_items"]},
+    {"pattern": "payment|ödeme", "tables": ["fact_order_payments", "fact_orders"]},
+    {"pattern": "review|yorum|skor", "tables": ["fact_order_reviews", "fact_orders"]},
+    {"pattern": "kampanya|campaign", "tables": ["fact_orders", "fact_order_items"]}
+  ],
+  "default_tables": ["fact_orders", "fact_order_items", "dim_customer", "dim_product"],
+  "clarify_cues": {
+    "geo_pattern": "\\b(sp|rj|mg|pr|rs|ba|pe|ce|df|es|go|sc|são\\s*paulo|sao\\s*paulo|rio|eyalet|şehir|sehir)\\b",
+    "time_pattern": "(geçen\\s*ay|gecen\\s*ay|bu\\s*ay|bu\\s*yıl|bu\\s*yil|geçen\\s*yıl|201[6-8]|ocak|şubat|subat|mart|nisan|mayıs|mayis|haziran|temmuz|ağustos|agustos|eylül|eylul|ekim|kasım|kasim|aralık|aralik|ayki|tarih|yılı|yili)",
+    "metric_pattern": "(satış|satis|gmv|ciro|sipariş|siparis|ortalama|analiz|trend|kategori|health|beauty|ürün|urun|müşteri|musteri|performans)"
+  },
+  "prompt": {
+    "system_fragment": "Domain: Olist Brazilian e-commerce DWH. Answer in Turkish.\nNo İzmir/Turkey phone-campaign stories — offer SP/RJ / category analogs instead.\nRelative dates → DATA CALENDAR (ignore sparse Sep/Oct 2018 tail).\nSales → GMV SUM(fact_order_items.price) + distinct orders; prefer delivered.\nSão Paulo → customer_state='SP'.",
+    "ui_examples": [
+      "São Paulo’da geçen ayki satışlar nasıl?",
+      "Haziran 2018’de kategorilere göre GMV sıralaması",
+      "fact_orders ilk 50 satırı göster"
+    ],
+    "ui_subtitle": "Satış ve performans soruları"
+  }
+}

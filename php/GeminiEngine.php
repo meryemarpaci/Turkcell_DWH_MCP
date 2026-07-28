@@ -22,7 +22,7 @@ final class GeminiEngine implements LlmEngine
     public function __construct(?string $apiKey = null, ?string $model = null)
     {
         $this->apiKey = $apiKey ?? (string) app_env('GEMINI_API_KEY', '');
-        $this->model = $model ?? (string) app_env('GEMINI_MODEL', 'gemini-flash-latest');
+        $this->model = $model ?? (string) app_env('GEMINI_MODEL', 'gemini-3-flash-preview');
         if ($this->apiKey === '') {
             throw new RuntimeException('GEMINI_API_KEY missing');
         }
@@ -91,7 +91,7 @@ final class GeminiEngine implements LlmEngine
             'contents' => $contents,
             'generationConfig' => [
                 'temperature' => 0.2,
-                'maxOutputTokens' => 2048,
+                'maxOutputTokens' => max(1024, (int) app_env('GEMINI_MAX_OUTPUT_TOKENS', '4096')),
             ],
         ];
         if ($system !== '') {
@@ -172,7 +172,7 @@ final class GeminiEngine implements LlmEngine
      */
     private function postGenerateContent(string $url, array $body): array
     {
-        $attempts = max(1, (int) app_env('GEMINI_RETRY_ATTEMPTS', '3'));
+        $attempts = max(1, (int) app_env('GEMINI_RETRY_ATTEMPTS', '2'));
         $lastMsg = 'unknown';
         for ($i = 1; $i <= $attempts; $i++) {
             $res = HttpJson::post($url, $body, [
@@ -183,16 +183,44 @@ final class GeminiEngine implements LlmEngine
                 return $decoded;
             }
             $lastMsg = (string) ($decoded['error']['message'] ?? ('HTTP ' . $res['status']));
+            // Quota / hard 429: do not sleep-retry the same model — cascade or fall back.
+            if (self::isQuotaError($lastMsg, $res['status'])) {
+                throw new RuntimeException('Gemini API error: ' . $lastMsg);
+            }
             if (!self::isTransientError($lastMsg, $res['status']) || $i === $attempts) {
                 throw new RuntimeException('Gemini API error: ' . $lastMsg);
             }
-            usleep((int) min(12, 2 ** $i) * 1_000_000);
+            usleep(800_000 * $i);
         }
         throw new RuntimeException('Gemini API error: ' . $lastMsg);
     }
 
+    public static function isQuotaError(string $message, int $status = 0): bool
+    {
+        $low = strtolower($message);
+        if ($status === 429 && (str_contains($low, 'quota') || str_contains($low, 'rate'))) {
+            return true;
+        }
+        return str_contains($low, 'quota exceeded')
+            || str_contains($low, 'exceeded your current quota')
+            || str_contains($low, 'rate-limits')
+            || str_contains($low, 'generate_content_free_tier');
+    }
+
+    /** Parse "Please retry in 36.5s" → seconds to wait (or null). */
+    public static function retryAfterSeconds(string $message): ?int
+    {
+        if (preg_match('/retry in\s+([0-9]+(?:\.[0-9]+)?)\s*s/i', $message, $m)) {
+            return max(1, (int) ceil((float) $m[1]));
+        }
+        return null;
+    }
+
     public static function isTransientError(string $message, int $status = 0): bool
     {
+        if (self::isQuotaError($message, $status)) {
+            return true;
+        }
         $low = strtolower($message);
         if (in_array($status, [429, 500, 502, 503, 504], true)) {
             return true;
@@ -203,7 +231,6 @@ final class GeminiEngine implements LlmEngine
             || str_contains($low, 'temporarily')
             || str_contains($low, 'resource_exhausted')
             || str_contains($low, 'rate limit')
-            || str_contains($low, 'quota exceeded')
             || str_contains($low, 'overloaded');
     }
 
@@ -223,17 +250,24 @@ final class GeminiEngine implements LlmEngine
     /** @return list<string> */
     public static function modelCascade(): array
     {
-        $primary = (string) app_env('GEMINI_MODEL', 'gemini-flash-latest');
+        // Prefer Gemini 3.x IDs. Do NOT use gemini-2.5-flash / gemini-2.0-flash
+        // (unavailable or limit:0 for many new free-tier keys).
+        $primary = (string) app_env('GEMINI_MODEL', 'gemini-3-flash-preview');
         $raw = (string) app_env(
             'GEMINI_FALLBACK_MODELS',
-            'gemini-2.0-flash,gemini-3.5-flash,gemini-2.5-flash'
+            'gemini-3.1-flash-lite,gemini-flash-latest'
         );
         $models = [$primary];
         foreach (explode(',', $raw) as $m) {
             $m = trim($m);
-            if ($m !== '' && !in_array($m, $models, true)) {
-                $models[] = $m;
+            if ($m === '' || in_array($m, $models, true)) {
+                continue;
             }
+            // Hard-block retired / useless free-tier models for new keys
+            if (preg_match('/^gemini-2\.(0|5)-flash$/i', $m)) {
+                continue;
+            }
+            $models[] = $m;
         }
         return $models;
     }

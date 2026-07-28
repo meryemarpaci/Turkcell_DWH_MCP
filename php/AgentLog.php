@@ -4,24 +4,31 @@ declare(strict_types=1);
 
 namespace App;
 
-/** Structured pipeline log entries for browser DevTools. */
+/** Structured pipeline log — optionally emits each entry live (NDJSON stream). */
 final class AgentLog
 {
     /** @var list<array<string,mixed>> */
     private array $entries = [];
     private float $t0;
+    /** @var null|callable(array<string,mixed>):void */
+    private $onEmit;
 
-    public function __construct()
+    public function __construct(?callable $onEmit = null)
     {
         $this->t0 = microtime(true);
+        $this->onEmit = $onEmit;
     }
 
     public function add(string $stage, array $data = []): void
     {
-        $this->entries[] = array_merge([
+        $entry = array_merge([
             't_ms' => (int) round((microtime(true) - $this->t0) * 1000),
             'stage' => $stage,
         ], $data);
+        $this->entries[] = $entry;
+        if ($this->onEmit !== null) {
+            ($this->onEmit)($entry);
+        }
     }
 
     /** @return list<array<string,mixed>> */

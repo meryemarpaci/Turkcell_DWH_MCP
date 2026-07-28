@@ -18,13 +18,13 @@
         <div class="brand-mark" aria-hidden="true"></div>
         <div>
           <div class="brand-name">Veri Asistanı</div>
-          <div class="brand-sub">Satış ve performans soruları</div>
+          <div class="brand-sub" id="brandSub">Veri seti yükleniyor…</div>
         </div>
       </div>
       <button type="button" class="btn-new" id="btnNewChat">Yeni sohbet</button>
       <a class="btn-new btn-schema" href="/schema.html">Veri haritası</a>
-      <div class="sidebar-hint">
-        Doğal dilde sor; eyalet, tarih ve metriği kendisi çıkarır (ör. São Paulo + geçen ay).
+      <div class="sidebar-hint" id="sidebarHint">
+        Doğal dilde sor; filtre ve metriği aktif profil çıkarır.
       </div>
       <div class="sidebar-footer" id="healthStatus">Bağlanıyor…</div>
     </aside>
@@ -32,7 +32,7 @@
     <main class="main">
       <header class="topbar" id="topbar">
         <h1 class="top-title">Bugün neyi incelemek istersin?</h1>
-        <p class="top-sub">Örnek: “São Paulo’da geçen ayki satışlar nasıl?”</p>
+        <p class="top-sub" id="topSub">Profil örnekleri yükleniyor…</p>
       </header>
 
       <section class="messages" id="messages" aria-live="polite"></section>

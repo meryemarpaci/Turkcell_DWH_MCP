@@ -39,7 +39,7 @@ final class GroqEngine implements LlmEngine
             'model' => $this->model,
             'messages' => $messages,
             'temperature' => 0.2,
-            'max_tokens' => 1024,
+            'max_tokens' => max(512, (int) app_env('GROQ_MAX_TOKENS', '2048')),
         ];
         if ($tools !== []) {
             $body['tools'] = $tools;

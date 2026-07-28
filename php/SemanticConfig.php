@@ -4,26 +4,12 @@ declare(strict_types=1);
 
 namespace App;
 
+/** Thin facade — all semantic data comes from the active DatasetProfile. */
 final class SemanticConfig
 {
-    private static ?array $data = null;
-
     public static function all(): array
     {
-        if (self::$data !== null) {
-            return self::$data;
-        }
-        $path = APP_ROOT . '/php/config/semantic.json';
-        $raw = file_get_contents($path);
-        if ($raw === false) {
-            throw new \RuntimeException('semantic.json missing');
-        }
-        $decoded = json_decode($raw, true);
-        if (!is_array($decoded)) {
-            throw new \RuntimeException('semantic.json invalid');
-        }
-        self::$data = $decoded;
-        return self::$data;
+        return DatasetProfile::semantic();
     }
 
     /** @return list<string> */

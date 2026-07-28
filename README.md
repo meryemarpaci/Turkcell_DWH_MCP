@@ -47,8 +47,11 @@ copy .env.example .env
 `.env` içinde en azından:
 
 - `GEMINI_API_KEY`
-- `GEMINI_MODEL` (ör. `gemini-flash-latest`)
+- `GEMINI_MODEL` (ör. `gemini-3-flash-preview`)
+- `DWH_PROFILE=olist` → `php/config/profiles/<id>.json`
 - `DWH_SQLITE_PATH=Data/olist_dwh.sqlite`
+
+Yeni veri seti: SQLite’ı koy + `_template.json`’dan profil yaz + `.env`’de `DWH_PROFILE` / `DWH_SQLITE_PATH` değiştir. PHP kodu değiştirmen gerekmez (ayrıntı: `Data/README.md`).
 
 4. SQLite DWH oluşturma (CSV’ler `Data/` altında ise):
 

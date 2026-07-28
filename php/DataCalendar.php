@@ -10,39 +10,58 @@ use DateTimeImmutable;
 use Throwable;
 
 /**
- * Relative dates ("geçen ay", "bu ay") resolve against the last *substantial*
- * months in the DWH — Olist has a nearly-empty Sep/Oct 2018 tail that must
- * not be used as "last month" for sales questions.
+ * Relative dates resolve against substantial months in the active dataset profile.
+ * Table/column/thresholds come from DatasetProfile::calendar() — not hardcoded Olist.
  */
 final class DataCalendar
 {
-    private const MIN_ORDERS_FOR_MONTH = 200;
-
     private static ?array $cache = null;
+    private static ?string $cacheKey = null;
 
     public static function contextBlock(): string
     {
         $c = self::info();
-        return implode("\n", [
+        $defaults = DatasetProfile::defaults();
+        $lines = [
             '# DATA CALENDAR (MUST use for relative dates — NOT wall-clock today)',
-            "raw_min_purchase: {$c['min']}",
-            "raw_max_purchase: {$c['max']}",
+            'profile: ' . DatasetProfile::id(),
+            "raw_min: {$c['min']}",
+            "raw_max: {$c['max']}",
             "WARNING: {$c['tail_note']}",
             '',
             'Relative period mapping (use these exact ranges):',
-            "- \"bu ay\" / current month → {$c['latest_month_start']} .. {$c['latest_month_end']}  ({$c['latest_month_orders']} orders dataset-wide)",
-            "- \"geçen ay\" / last month → {$c['prev_month_start']} .. {$c['prev_month_end']}  ({$c['prev_month_orders']} orders dataset-wide)",
+            "- \"bu ay\" / current month → {$c['latest_month_start']} .. {$c['latest_month_end']}  ({$c['latest_month_orders']} rows)",
+            "- \"geçen ay\" / last month → {$c['prev_month_start']} .. {$c['prev_month_end']}  ({$c['prev_month_orders']} rows)",
             "- \"bu yıl\" → {$c['latest_year']}-01-01 .. {$c['latest_month_end']}",
             '',
-            'City/state shortcuts:',
-            "- São Paulo / Sao Paulo / SP → dim_customer.customer_state = 'SP'",
-            "- Rio / Rio de Janeiro / RJ → customer_state = 'RJ'",
-            "- Default for satış/GMV: order_status = 'delivered' (unless user says otherwise)",
-            '- Default metric: GMV = SUM(fact_order_items.price), also COUNT(DISTINCT fact_orders.order_id)',
-            '- Prefer join: orders_customer + items_orders (never items+payments for GMV)',
-            '',
-            'If a filter returns 0 rows: widen status (drop delivered) or shift one month earlier — do not invent empty-business stories without retrying.',
-        ]);
+            'City/state / domain shortcuts:',
+        ];
+        foreach (DatasetProfile::aliases() as $a) {
+            $label = (string) ($a['label'] ?? 'alias');
+            $sql = (string) ($a['sql'] ?? '');
+            if ($sql !== '') {
+                $lines[] = "- {$label} → {$sql}";
+            }
+        }
+        $status = trim((string) ($defaults['status_filter_sql'] ?? ''));
+        if ($status !== '') {
+            $lines[] = "- Default status filter (unless user overrides): {$status}";
+        }
+        $metricNote = trim((string) ($defaults['primary_metric_note'] ?? ''));
+        if ($metricNote !== '') {
+            $lines[] = "- Default metric: {$metricNote}";
+        }
+        $joins = $defaults['preferred_join_ids'] ?? [];
+        if (is_array($joins) && $joins !== []) {
+            $lines[] = '- Prefer joins: ' . implode(', ', $joins);
+        }
+        $avoid = trim((string) ($defaults['avoid_join_note'] ?? ''));
+        if ($avoid !== '') {
+            $lines[] = "- {$avoid}";
+        }
+        $lines[] = '';
+        $lines[] = 'If a filter returns 0 rows: widen filters or shift one month earlier — do not invent empty stories without retrying.';
+        return implode("\n", $lines);
     }
 
     /**
@@ -55,37 +74,51 @@ final class DataCalendar
      */
     public static function info(): array
     {
-        if (self::$cache !== null) {
+        $key = DatasetProfile::id();
+        if (self::$cache !== null && self::$cacheKey === $key) {
             return self::$cache;
         }
 
-        $min = '2016-09-04';
-        $max = '2018-10-17';
+        $cal = DatasetProfile::calendar();
+        $fact = (string) ($cal['fact_table'] ?? '');
+        $dateCol = (string) ($cal['date_column'] ?? '');
+        $minRows = max(1, (int) ($cal['min_rows_per_month'] ?? 1));
+        $min = (string) ($cal['fallback_min'] ?? '2000-01-01');
+        $max = (string) ($cal['fallback_max'] ?? '2099-12-31');
         $months = [];
-        try {
-            $pdo = Database::pdo();
-            $min = (string) ($pdo->query('SELECT MIN(order_purchase_timestamp) FROM fact_orders')->fetchColumn() ?: $min);
-            $max = (string) ($pdo->query('SELECT MAX(order_purchase_timestamp) FROM fact_orders')->fetchColumn() ?: $max);
-            $sql = "SELECT substr(order_purchase_timestamp, 1, 7) AS m, COUNT(*) AS n
-                    FROM fact_orders
-                    GROUP BY 1
-                    ORDER BY 1 DESC";
-            $months = $pdo->query($sql)->fetchAll();
-        } catch (Throwable) {
-            // keep defaults
+
+        if ($fact !== '' && $dateCol !== ''
+            && preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $fact)
+            && preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $dateCol)
+            && in_array($fact, SemanticConfig::allowedTables(), true)
+        ) {
+            try {
+                $pdo = Database::pdo();
+                // Identifiers from profile only (allowlisted table)
+                $minQ = $pdo->query("SELECT MIN({$dateCol}) FROM {$fact}");
+                $maxQ = $pdo->query("SELECT MAX({$dateCol}) FROM {$fact}");
+                $min = (string) ($minQ?->fetchColumn() ?: $min);
+                $max = (string) ($maxQ?->fetchColumn() ?: $max);
+                $sql = "SELECT substr({$dateCol}, 1, 7) AS m, COUNT(*) AS n
+                        FROM {$fact}
+                        GROUP BY 1
+                        ORDER BY 1 DESC";
+                $months = $pdo->query($sql)->fetchAll();
+            } catch (Throwable) {
+                // keep fallbacks
+            }
         }
 
         $substantial = [];
         foreach ($months as $row) {
             $n = (int) ($row['n'] ?? 0);
-            if ($n >= self::MIN_ORDERS_FOR_MONTH) {
+            if ($n >= $minRows) {
                 $substantial[] = ['m' => (string) $row['m'], 'n' => $n];
             }
         }
 
         if ($substantial === []) {
-            // fallback: two calendar months before max
-            $maxDt = new DateTimeImmutable(substr($max, 0, 10));
+            $maxDt = new DateTimeImmutable(substr($max, 0, 10) ?: '2000-01-01');
             $latestStart = $maxDt->modify('first day of this month');
             $prevStart = $latestStart->sub(new DateInterval('P1M'));
             self::$cache = [
@@ -100,20 +133,21 @@ final class DataCalendar
                 'latest_year' => $latestStart->format('Y'),
                 'tail_note' => 'No substantial months found; using calendar months of max date.',
             ];
+            self::$cacheKey = $key;
             return self::$cache;
         }
 
         $latest = $substantial[0];
         $prev = $substantial[1] ?? $substantial[0];
-        $latestYm = $latest['m']; // YYYY-MM
+        $latestYm = $latest['m'];
         $prevYm = $prev['m'];
 
         $tailSparse = [];
         foreach ($months as $row) {
-            if ((int) $row['n'] < self::MIN_ORDERS_FOR_MONTH) {
+            if ((int) $row['n'] < $minRows) {
                 $tailSparse[] = $row['m'] . '(' . $row['n'] . ')';
             } else {
-                break; // months are DESC; stop after first substantial
+                break;
             }
         }
 
@@ -131,6 +165,7 @@ final class DataCalendar
                 ? 'Dataset ends cleanly on last substantial month.'
                 : ('Sparse tail months ignored for relative dates: ' . implode(', ', $tailSparse)),
         ];
+        self::$cacheKey = $key;
         return self::$cache;
     }
 

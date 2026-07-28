@@ -6,6 +6,7 @@ namespace App\Tools;
 
 use PDO;
 use RuntimeException;
+use App\DatasetProfile;
 
 final class Database
 {
@@ -16,8 +17,8 @@ final class Database
         if (self::$pdo instanceof PDO) {
             return self::$pdo;
         }
-        $rel = app_env('DWH_SQLITE_PATH', 'Data/olist_dwh.sqlite');
-        $path = APP_ROOT . DIRECTORY_SEPARATOR . str_replace(['/', '\\'], DIRECTORY_SEPARATOR, (string) $rel);
+        $rel = DatasetProfile::sqliteRelativePath();
+        $path = APP_ROOT . DIRECTORY_SEPARATOR . str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $rel);
         if (!is_file($path)) {
             throw new RuntimeException("DWH sqlite not found: $path");
         }

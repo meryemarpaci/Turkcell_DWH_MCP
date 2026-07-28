@@ -19,7 +19,7 @@ final class AgentOrchestrator
     private SessionStore $sessions;
     private AgentLog $log;
 
-    public function __construct(?LlmEngine $llm = null)
+    public function __construct(?LlmEngine $llm = null, ?callable $onProgress = null)
     {
         $guard = new SqlGuard(SemanticConfig::allowedTables());
         $this->schemaTool = new SchemaTool();
@@ -27,7 +27,7 @@ final class AgentOrchestrator
         $this->reportTool = new ReportTool($guard);
         $this->llm = $llm ?? new GeminiEngine();
         $this->sessions = new SessionStore();
-        $this->log = new AgentLog();
+        $this->log = new AgentLog($onProgress);
     }
 
     public function handle(string $sessionId, string $message): array
@@ -59,9 +59,11 @@ final class AgentOrchestrator
         $collectedReports = [];
         $clarify = null;
         $trace = [];
-        $maxSteps = 5;
+        $maxSteps = 4;
+        $maxReports = 2; // prefer 1; hard cap 2
         $finalText = '';
         $llmCalls = 0;
+        $emptyReportRetries = 0;
 
         for ($step = 0; $step < $maxSteps; $step++) {
             $this->log->add('llm_request', [
@@ -132,6 +134,10 @@ final class AgentOrchestrator
                 $this->log->add('tool_call', [
                     'tool' => $name,
                     'args' => $args,
+                    'sql' => isset($args['sql']) ? (string) $args['sql'] : null,
+                    'report_type' => isset($args['report_type']) ? (string) $args['report_type'] : null,
+                    'title' => isset($args['title']) ? (string) $args['title'] : null,
+                    'max_rows' => $args['max_rows'] ?? null,
                 ]);
                 $tTool = microtime(true);
                 $result = $this->dispatchTool($name, $args);
@@ -151,14 +157,23 @@ final class AgentOrchestrator
                         'user_message' => AgentLog::preview($message, 160),
                     ]);
                     $calendar = DataCalendar::info();
+                    $defaults = DatasetProfile::defaults();
+                    $aliasHint = '';
+                    foreach (DatasetProfile::aliases() as $a) {
+                        if ($aliasHint === '' && !empty($a['sql'])) {
+                            $aliasHint = (string) $a['sql'];
+                        }
+                    }
+                    $status = trim((string) ($defaults['status_filter_sql'] ?? ''));
                     $compact = [
                         'ok' => false,
                         'suppressed' => true,
-                            'instruction' => 'Do NOT ask the user. Use DATA CALENDAR relative ranges '
-                                . "(geçen ay = {$calendar['prev_month_start']}..{$calendar['prev_month_end']}; "
-                                . "bu ay = {$calendar['latest_month_start']}..{$calendar['latest_month_end']}; "
-                                . "São Paulo = customer_state SP; prefer order_status=delivered). "
-                                . 'Call probe_join then run_report now. Never use sparse Sep/Oct 2018 tail for "geçen ay".',
+                        'instruction' => 'Do NOT ask the user. Use DATA CALENDAR ranges and call run_report now '
+                            . "(geçen ay = {$calendar['prev_month_start']}..{$calendar['prev_month_end']}; "
+                            . "bu ay = {$calendar['latest_month_start']}..{$calendar['latest_month_end']}"
+                            . ($aliasHint !== '' ? "; e.g. {$aliasHint}" : '')
+                            . ($status !== '' ? "; prefer {$status}" : '')
+                            . '). Do not probe unless join/filter is uncertain.',
                     ];
                 } elseif ($name === 'ask_user') {
                     $clarify = $result;
@@ -173,18 +188,29 @@ final class AgentOrchestrator
                             break;
                         }
                     }
-                    if ($rowCount === 0 || ($kpiZero && ($result['kpi'] ?? []) !== [])) {
+                    if ($emptyReportRetries < 1 && ($rowCount === 0 || ($kpiZero && ($result['kpi'] ?? []) !== []))) {
+                        $emptyReportRetries++;
                         $cal = DataCalendar::info();
-                        $compact['zero_result_hint'] = 'Query returned empty/zero. Retry run_report with '
+                        $defaults = DatasetProfile::defaults();
+                        $status = trim((string) ($defaults['status_filter_sql'] ?? ''));
+                        $compact['zero_result_hint'] = 'Query returned empty/zero. Retry run_report ONCE with '
                             . "geçen ay = {$cal['prev_month_start']}..{$cal['prev_month_end']} "
-                            . "or bu ay = {$cal['latest_month_start']}..{$cal['latest_month_end']}, "
-                            . 'customer_state=SP for São Paulo, and preferably order_status=delivered. '
-                            . 'Do not conclude "no sales" until you retry once with DATA CALENDAR ranges.';
-                        // allow another tool loop instead of stopping on empty report
+                            . "or bu ay = {$cal['latest_month_start']}..{$cal['latest_month_end']}"
+                            . ($status !== '' ? ", {$status}" : '')
+                            . '. Use profile aliases. Do not probe.';
                         array_pop($collectedReports);
                         $this->log->add('empty_report_retry_hint', [
                             'hint' => $compact['zero_result_hint'],
                         ]);
+                    } elseif (count($collectedReports) >= $maxReports) {
+                        $compact['stop_hint'] = 'Report budget reached. Do NOT call more tools — write the Turkish answer now.';
+                        $this->log->add('reports_cap_reached', ['count' => count($collectedReports)]);
+                    } elseif (count($collectedReports) === 1) {
+                        $compact['next_hint'] = 'You already have a report. Prefer answering NOW. '
+                            . 'Only call run_report once more if a clearly different grain is still missing '
+                            . '(e.g. ranking vs trend). Do NOT fetch an extra month for comparison unless the user asked.';
+                    } else {
+                        $compact['next_hint'] = 'Prefer a single run_report; answer when enough.';
                     }
                 }
 
@@ -205,10 +231,12 @@ final class AgentOrchestrator
                 break;
             }
 
-            if ($collectedReports !== []) {
+            // Allow iterative follow-up tool calls; stop early only at report cap
+            if (count($collectedReports) >= $maxReports) {
                 $this->log->add('reports_ready', [
                     'count' => count($collectedReports),
                     'ids' => array_map(static fn ($r) => $r['report_id'] ?? '?', $collectedReports),
+                    'reason' => 'cap',
                 ]);
                 break;
             }
@@ -218,11 +246,16 @@ final class AgentOrchestrator
             if ($collectedReports !== []) {
                 $this->log->add('compose_report_start', ['provider' => $this->llm->name()]);
                 $t = microtime(true);
-                $finalText = $this->composeReport($message, $collectedReports);
-                $llmCalls++;
+                $composed = $this->composeReport($message, $collectedReports);
+                $finalText = $composed['text'];
+                if ($composed['used_llm']) {
+                    $llmCalls++;
+                }
                 $this->log->add('compose_report_done', [
                     'elapsed_ms' => (int) round((microtime(true) - $t) * 1000),
-                    'text_preview' => AgentLog::preview($finalText),
+                    'used_llm' => $composed['used_llm'],
+                    'repaired' => $composed['repaired'] ?? false,
+                    'text_preview' => AgentLog::preview($finalText, 320),
                 ]);
             } else {
                 $this->log->add('request_final_answer_start', ['provider' => $this->llm->name()]);
@@ -254,11 +287,17 @@ final class AgentOrchestrator
         $this->sessions->save($sessionId, $state);
 
         $uiReports = array_map(static function (array $r): array {
+            $type = strtolower((string) ($r['report_type'] ?? 'table'));
+            $uiCap = match ($type) {
+                'browse' => 100,
+                'trend' => 24,
+                'kpi' => 8,
+                default => 40,
+            };
             if (isset($r['table']['rows']) && is_array($r['table']['rows'])) {
-                $r['table']['rows'] = array_slice($r['table']['rows'], 0, 8);
+                $r['table']['rows'] = array_slice($r['table']['rows'], 0, $uiCap);
             }
             if (isset($r['series']) && is_array($r['series'])) {
-                // Prefer at most 2 series for chart clarity (orders + gmv)
                 $r['series'] = array_slice($r['series'], 0, 2);
             }
             return $r;
@@ -288,9 +327,18 @@ final class AgentOrchestrator
     private function buildSystemPrompt(): string
     {
         $base = (string) file_get_contents(APP_ROOT . '/php/prompts/system.md');
+        $fragment = trim((string) (DatasetProfile::prompt()['system_fragment'] ?? ''));
         $schema = $this->schemaTool->schemaPromptBlock(true);
         $calendar = DataCalendar::contextBlock();
-        return $base . "\n\n" . $calendar . "\n\n" . $schema;
+        $parts = [$base];
+        if ($fragment !== '') {
+            $parts[] = "# DATASET PROFILE\nid: " . DatasetProfile::id()
+                . "\n" . (DatasetProfile::get()['display_name'] ?? '')
+                . "\n\n" . $fragment;
+        }
+        $parts[] = $calendar;
+        $parts[] = $schema;
+        return implode("\n\n", $parts);
     }
 
     /** @return list<array<string,mixed>> */
@@ -334,8 +382,35 @@ final class AgentOrchestrator
         return trim((string) ($response['content'] ?? ''));
     }
 
-    private function composeReport(string $userQuestion, array $reports): string
+    /**
+     * @param list<array<string,mixed>> $reports
+     * @return array{text:string,used_llm:bool}
+     */
+    private function composeReport(string $userQuestion, array $reports): array
     {
+        $allUiOnly = $reports !== [] && array_reduce(
+            $reports,
+            static function (bool $ok, array $r): bool {
+                $type = strtolower((string) ($r['report_type'] ?? ''));
+                $delivery = (string) ($r['delivery'] ?? '');
+                return $ok && ($type === 'browse' || $delivery === 'ui_only');
+            },
+            true
+        );
+        if ($allUiOnly) {
+            $parts = [];
+            foreach ($reports as $r) {
+                $n = (int) ($r['meta']['row_count'] ?? count($r['table']['rows'] ?? []));
+                $title = (string) ($r['title'] ?? 'Liste');
+                $trunc = !empty($r['meta']['truncated']) ? ' (limit uygulandı)' : '';
+                $parts[] = "{$title}: {$n} satır UI tablosunda gösteriliyor{$trunc}.";
+            }
+            return [
+                'text' => implode(' ', $parts) . ' Satır değerlerini uydurmadım; detay aşağıdaki tabloda.',
+                'used_llm' => false,
+            ];
+        }
+
         $reportPrompt = (string) file_get_contents(APP_ROOT . '/php/prompts/report.md');
         $payload = json_encode(
             [
@@ -346,12 +421,143 @@ final class AgentOrchestrator
         );
         $response = $this->llm->complete(
             [
-                ['role' => 'system', 'content' => 'Short Turkish BI note. Max 8 lines. No ### headings, no markdown tables.'],
+                [
+                    'role' => 'system',
+                    'content' => 'Short Turkish BI note. Max 8 complete lines. '
+                        . 'Always finish every sentence with . ! or ? — never stop mid-phrase. '
+                        . 'No ### headings, no markdown tables.',
+                ],
                 ['role' => 'user', 'content' => $reportPrompt . "\n\nDATA:\n" . $payload],
             ],
             []
         );
-        return trim((string) ($response['content'] ?? ''));
+        $text = trim((string) ($response['content'] ?? ''));
+        $repaired = false;
+        if ($text === '' || $this->looksTruncated($text)) {
+            $fallback = $this->composeDeterministic($reports, $userQuestion);
+            // Prefer LLM if it already has a usable paragraph; only replace empty/mid-cut.
+            if ($text === '' || mb_strlen($text) < 60) {
+                $text = $fallback;
+            } else {
+                // Mid-cut: keep start, finish with deterministic closing line
+                $text = rtrim($text, " \t\n\r-,;") . ".\n" . $fallback;
+            }
+            $repaired = true;
+        }
+        return [
+            'text' => $text,
+            'used_llm' => true,
+            'repaired' => $repaired,
+        ];
+    }
+
+    private function looksTruncated(string $text): bool
+    {
+        $t = rtrim($text);
+        if ($t === '') {
+            return true;
+        }
+        // Clear mid-phrase cuts (the original bug)
+        if (preg_match('/\b(seviyesinden|seviyesine|karşılık)$/iu', $t)) {
+            return true;
+        }
+        if (preg_match('/[-,;:]$/u', $t)) {
+            return true;
+        }
+        // Very short answer without terminal punctuation
+        if (mb_strlen($t) < 50 && !preg_match('/[.!?…]$/u', $t)) {
+            return true;
+        }
+        return false;
+    }
+
+    /** @param list<array<string,mixed>> $reports */
+    private function composeDeterministic(array $reports, string $question): string
+    {
+        $parts = [];
+        foreach ($reports as $r) {
+            $title = (string) ($r['title'] ?? 'Rapor');
+            $type = strtolower((string) ($r['report_type'] ?? 'table'));
+            $compact = LlmPayload::analysisResultForLlm($r);
+
+            if ($type === 'browse' || ($compact['delivery'] ?? '') === 'ui_only') {
+                $n = (int) ($compact['meta']['row_count'] ?? 0);
+                $parts[] = "{$title} için {$n} satır aşağıdaki tabloda listeleniyor.";
+                continue;
+            }
+
+            $series = $compact['series_summary'] ?? [];
+            if ($series !== []) {
+                $bits = [];
+                foreach ($series as $s) {
+                    $name = $this->humanMetric((string) ($s['name'] ?? 'metrik'));
+                    $first = $s['first'] ?? [];
+                    $last = $s['last'] ?? [];
+                    $delta = $s['delta_pct'] ?? null;
+                    $fx = (string) ($first['x'] ?? '');
+                    $lx = (string) ($last['x'] ?? '');
+                    $line = sprintf(
+                        '%s %s döneminde %s iken %s döneminde %s',
+                        $name,
+                        $fx,
+                        $this->fmtNum($first['y'] ?? null),
+                        $lx,
+                        $this->fmtNum($last['y'] ?? null)
+                    );
+                    if (is_numeric($delta)) {
+                        $d = (float) $delta;
+                        $dir = $d > 0.5 ? 'yükseldi' : ($d < -0.5 ? 'geriledi' : 'yatay kaldı');
+                        $line .= sprintf(' (%s, %%%s)', $dir, $this->fmtNum(abs($d)));
+                    }
+                    $bits[] = $line;
+                }
+                $intro = $title !== '' ? "{$title}: " : '';
+                $parts[] = $intro . implode('; ', $bits) . '.';
+                continue;
+            }
+
+            $kpi = $compact['kpi'] ?? [];
+            if ($kpi !== []) {
+                $bits = [];
+                foreach (array_slice($kpi, 0, 4) as $k) {
+                    $bits[] = $this->humanMetric((string) ($k['name'] ?? 'metrik'))
+                        . ' ' . $this->fmtNum($k['value'] ?? null);
+                }
+                $parts[] = $title . ' özeti — ' . implode(', ', $bits) . '.';
+            }
+        }
+
+        if ($parts === []) {
+            return 'Analiz tamamlandı; özet grafik ve tabloda.';
+        }
+        $parts[] = 'Ayrıntılar aşağıdaki görsellerde.';
+        return implode(' ', $parts);
+    }
+
+    private function humanMetric(string $name): string
+    {
+        $n = mb_strtolower(trim($name));
+        return match (true) {
+            str_contains($n, 'gmv') || str_contains($n, 'price') || str_contains($n, 'revenue') => 'GMV',
+            str_contains($n, 'order') => 'sipariş adedi',
+            str_contains($n, 'customer') => 'müşteri sayısı',
+            default => $name,
+        };
+    }
+
+    private function fmtNum(mixed $v): string
+    {
+        if ($v === null || $v === '') {
+            return '—';
+        }
+        if (!is_numeric($v)) {
+            return (string) $v;
+        }
+        $n = (float) $v;
+        if (abs($n - round($n)) < 0.001) {
+            return number_format($n, 0, ',', '.');
+        }
+        return number_format($n, 2, ',', '.');
     }
 
     /** @return list<array<string,mixed>> */
@@ -402,7 +608,8 @@ final class AgentOrchestrator
             ],
             [
                 'name' => 'probe_join',
-                'description' => 'Validate join plan with COUNT/sample. Pass join edge ids. If fail, fix and retry.',
+                'description' => 'OPTIONAL control check — only if join correctness is uncertain. '
+                    . 'COUNT + up to 5 sample rows. Do NOT call on every request; prefer direct run_report.',
                 'parameters' => [
                     'type' => 'object',
                     'properties' => [
@@ -419,7 +626,8 @@ final class AgentOrchestrator
             ],
             [
                 'name' => 'probe_filter',
-                'description' => 'Validate filtered SELECT via COUNT + sample. If 0 rows, fix filters.',
+                'description' => 'OPTIONAL control check — only if filter population is uncertain. '
+                    . 'COUNT + up to 5 sample rows. Skip when defaults are clear; go to run_report.',
                 'parameters' => [
                     'type' => 'object',
                     'properties' => [
@@ -430,30 +638,38 @@ final class AgentOrchestrator
             ],
             [
                 'name' => 'run_report',
-                'description' => 'Run aggregate/report SQL in DB. Returns KPIs + at most 5 sample rows to the model (not full data).',
+                'description' => 'Run ONE analytical SQL (prefer a single call per user question). '
+                    . 'Put joins/filters/SUM|AVG|MIN|MAX|COUNT|GROUP BY in SQL. '
+                    . 'Combine grains in one query when possible (e.g. daily trend via GROUP BY day; '
+                    . 'do not add extra months unless user asked to compare). '
+                    . 'PHP returns compact summary; UI gets chart/table. '
+                    . 'report_type: kpi|trend|table|distribution|browse.',
                 'parameters' => [
                     'type' => 'object',
                     'properties' => [
                         'sql' => ['type' => 'string'],
                         'report_type' => [
                             'type' => 'string',
-                            'description' => 'kpi|trend|table|distribution|compare',
+                            'description' => 'kpi|trend|table|distribution|browse — browse = UI-only row grid',
                         ],
                         'report_id' => ['type' => 'string'],
                         'title' => ['type' => 'string'],
-                        'max_rows' => ['type' => 'integer', 'description' => 'Cap for SQL fetch before KPI; LLM still sees ≤5 rows'],
+                        'max_rows' => [
+                            'type' => 'integer',
+                            'description' => 'Fetch/UI cap (browse up to 100; analytics typically 20–40)',
+                        ],
                     ],
                     'required' => ['sql'],
                 ],
             ],
             [
                 'name' => 'execute_query',
-                'description' => 'Tiny SELECT sample only (hard max 5 rows). Prefer run_report for analytics.',
+                'description' => 'OPTIONAL control — rare. Metadata/COUNT style checks only; rows not sent to model.',
                 'parameters' => [
                     'type' => 'object',
                     'properties' => [
                         'sql' => ['type' => 'string'],
-                        'max_rows' => ['type' => 'integer', 'description' => 'Max 5'],
+                        'max_rows' => ['type' => 'integer', 'description' => 'Max 5 (control peek)'],
                     ],
                     'required' => ['sql'],
                 ],
@@ -461,8 +677,7 @@ final class AgentOrchestrator
             [
                 'name' => 'ask_user',
                 'description' => 'RARE. Only if the user message has no analyzable intent (greeting only). '
-                    . 'Do NOT use for date/state/category when the user already implied them '
-                    . '(e.g. São Paulo + geçen ay + satışlar). Resolve via DATA CALENDAR instead.',
+                    . 'Do NOT use when date/geo/metric cues are already present — resolve via DATA CALENDAR + profile aliases.',
                 'parameters' => [
                     'type' => 'object',
                     'properties' => [
@@ -506,7 +721,7 @@ final class AgentOrchestrator
                 (string) ($args['report_type'] ?? 'table'),
                 (string) ($args['report_id'] ?? 'report'),
                 (string) ($args['title'] ?? 'Report'),
-                isset($args['max_rows']) ? min(40, (int) $args['max_rows']) : 40
+                $this->resolveMaxRows($args)
             ),
             'execute_query' => $this->reportTool->executeQuery(
                 (string) ($args['sql'] ?? ''),
@@ -522,25 +737,44 @@ final class AgentOrchestrator
         };
     }
 
+    /** @param array<string,mixed> $args */
+    private function resolveMaxRows(array $args): ?int
+    {
+        $type = strtolower((string) ($args['report_type'] ?? 'table'));
+        $hard = $type === 'browse' ? 100 : 100;
+        if (!isset($args['max_rows'])) {
+            return $type === 'browse' ? 100 : 40;
+        }
+        return max(1, min($hard, (int) $args['max_rows']));
+    }
+
     /** True when the user already gave enough cues to analyze without asking. */
     private function isResolvableWithoutClarify(string $message): bool
     {
         $m = mb_strtolower($message);
-        $geo = (bool) preg_match(
-            '/\b(sp|rj|mg|pr|rs|ba|pe|ce|df|es|go|sc|são\s*paulo|sao\s*paulo|rio|eyalet|şehir|sehir)\b/u',
-            $m
-        );
-        $time = (bool) preg_match(
-            '/(geçen\s*ay|gecen\s*ay|bu\s*ay|bu\s*yıl|bu\s*yil|geçen\s*yıl|201[6-8]|'
-            . 'ocak|şubat|subat|mart|nisan|mayıs|mayis|haziran|temmuz|ağustos|agustos|'
-            . 'eylül|eylul|ekim|kasım|kasim|aralık|aralik|ayki|tarih|yılı|yili)/u',
-            $m
-        );
-        $metric = (bool) preg_match(
-            '/(satış|satis|gmv|ciro|sipariş|siparis|ortalama|analiz|trend|kategori|'
-            . 'health|beauty|ürün|urun|müşteri|musteri|performans)/u',
-            $m
-        );
+        $cues = DatasetProfile::clarifyCues();
+        $geoPat = trim((string) ($cues['geo_pattern'] ?? ''));
+        $timePat = trim((string) ($cues['time_pattern'] ?? ''));
+        $metricPat = trim((string) ($cues['metric_pattern'] ?? ''));
+
+        $geo = false;
+        if ($geoPat !== '') {
+            $geo = @preg_match('/' . $geoPat . '/ui', $m) === 1;
+        }
+        // Also match profile aliases
+        if (!$geo) {
+            foreach (DatasetProfile::aliases() as $a) {
+                foreach ($a['patterns'] ?? [] as $pat) {
+                    $pat = (string) $pat;
+                    if ($pat !== '' && @preg_match('/' . $pat . '/ui', $m) === 1) {
+                        $geo = true;
+                        break 2;
+                    }
+                }
+            }
+        }
+        $time = $timePat !== '' && @preg_match('/' . $timePat . '/ui', $m) === 1;
+        $metric = $metricPat !== '' && @preg_match('/' . $metricPat . '/ui', $m) === 1;
         $score = (int) $geo + (int) $time + (int) $metric;
         return $score >= 2 || ($metric && mb_strlen(trim($message)) >= 20);
     }
