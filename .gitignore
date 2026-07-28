@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.env
+.DS_Store
+Thumbs.db
+
+# Local runtime / secrets
+storage/sessions/*
+!storage/sessions/.gitkeep
+storage/runtime/*
+!storage/runtime/.gitkeep
+php/cache/*
+php/cacert.pem
+
+# Large local datasets (build SQLite via scripts/build_sqlite_dwh.py)
+Data/*.csv
+Data/*.sqlite
+Data/*.db
+!Data/.gitkeep
+!Data/README.md

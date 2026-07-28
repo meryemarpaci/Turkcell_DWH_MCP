@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "olist-dwh": {
+      "command": "python",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "."
+    }
+  }
+}

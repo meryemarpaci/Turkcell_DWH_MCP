@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Veri haritası</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=Instrument+Serif&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/assets/css/schema.css" />
+</head>
+<body>
+  <div class="schema-app">
+    <header class="schema-top">
+      <a class="back" href="/">← Sohbete dön</a>
+      <div>
+        <h1>Veri haritası</h1>
+        <p>Tabloları ve aralarındaki bağlantıları incele</p>
+      </div>
+      <div class="legend">
+        <span class="lg dim">dim</span>
+        <span class="lg fact">fact</span>
+        <span class="lg join">join</span>
+      </div>
+    </header>
+
+    <div class="schema-body">
+      <aside class="schema-side">
+        <h2>Tablolar</h2>
+        <div id="tableList" class="table-list"></div>
+        <h2>Bağlantılar</h2>
+        <div id="joinList" class="join-list"></div>
+      </aside>
+
+      <section class="canvas-wrap" id="canvasWrap">
+        <div class="viewport" id="viewport">
+          <svg id="joinLines" class="join-lines" aria-hidden="true"></svg>
+          <div id="diagram" class="diagram"></div>
+        </div>
+        <div class="canvas-hint">Sürükle: kaydır · Ctrl + scroll / pinch: yakınlaştır-uzaklaştır</div>
+      </section>
+
+      <aside class="detail-panel" id="detailPanel">
+        <h2 id="detailTitle">Detay</h2>
+        <p id="detailDesc" class="muted">Bir tabloya veya bağlantıya tıkla.</p>
+        <div id="detailBody"></div>
+      </aside>
+    </div>
+  </div>
+  <script src="/assets/js/schema.js"></script>
+</body>
+</html>

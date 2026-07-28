@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Veri Asistanı</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/assets/css/chat.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+  <script src="/assets/js/chat.js" defer></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"></div>
+        <div>
+          <div class="brand-name">Veri Asistanı</div>
+          <div class="brand-sub">Satış ve performans soruları</div>
+        </div>
+      </div>
+      <button type="button" class="btn-new" id="btnNewChat">Yeni sohbet</button>
+      <a class="btn-new btn-schema" href="/schema.html">Veri haritası</a>
+      <div class="sidebar-hint">
+        Doğal dilde sor; eyalet, tarih ve metriği kendisi çıkarır (ör. São Paulo + geçen ay).
+      </div>
+      <div class="sidebar-footer" id="healthStatus">Bağlanıyor…</div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar" id="topbar">
+        <h1 class="top-title">Bugün neyi incelemek istersin?</h1>
+        <p class="top-sub">Örnek: “São Paulo’da geçen ayki satışlar nasıl?”</p>
+      </header>
+
+      <section class="messages" id="messages" aria-live="polite"></section>
+
+      <footer class="composer-wrap">
+        <form class="composer" id="chatForm">
+          <textarea
+            id="input"
+            rows="1"
+            placeholder="Mesajını yaz…"
+            autocomplete="off"
+          ></textarea>
+          <button type="submit" class="btn-send" id="btnSend" aria-label="Gönder">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </form>
+        <div class="composer-note">Enter ile gönder · Shift+Enter ile yeni satır</div>
+      </footer>
+    </main>
+  </div>
+</body>
+</html>
