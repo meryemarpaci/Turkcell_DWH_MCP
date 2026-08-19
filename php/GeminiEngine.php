@@ -104,6 +104,7 @@ final class GeminiEngine implements LlmEngine
             foreach ($tools as $t) {
                 $fn = $t['function'] ?? $t;
                 $params = $fn['parameters'] ?? ['type' => 'object', 'properties' => new \stdClass()];
+                $params = self::sanitizeGeminiSchema($params);
                 if (($params['properties'] ?? null) === [] || !isset($params['properties'])) {
                     $params['properties'] = new \stdClass();
                 }
@@ -314,5 +315,56 @@ final class GeminiEngine implements LlmEngine
             $firstFc = false;
         }
         return $parts !== [] ? $parts : [['text' => '']];
+    }
+
+    /**
+     * Gemini functionDeclarations reject OpenAPI fields like additionalProperties.
+     *
+     * @param array<string,mixed>|\stdClass $schema
+     * @return array<string,mixed>|\stdClass
+     */
+    private static function sanitizeGeminiSchema(mixed $schema): mixed
+    {
+        if ($schema instanceof \stdClass) {
+            $schema = (array) $schema;
+        }
+        if (!is_array($schema)) {
+            return $schema;
+        }
+
+        unset(
+            $schema['additionalProperties'],
+            $schema['$schema'],
+            $schema['$id'],
+            $schema['examples'],
+            $schema['default'],
+            $schema['const']
+        );
+
+        foreach (['properties', 'items', 'anyOf', 'oneOf', 'allOf'] as $key) {
+            if (!isset($schema[$key])) {
+                continue;
+            }
+            if ($key === 'properties' && is_array($schema[$key])) {
+                if ($schema[$key] === []) {
+                    $schema[$key] = new \stdClass();
+                    continue;
+                }
+                $clean = [];
+                foreach ($schema[$key] as $propName => $propSchema) {
+                    $clean[$propName] = self::sanitizeGeminiSchema($propSchema);
+                }
+                $schema[$key] = $clean;
+            } elseif ($key === 'items') {
+                $schema[$key] = self::sanitizeGeminiSchema($schema[$key]);
+            } elseif (is_array($schema[$key])) {
+                $schema[$key] = array_map(
+                    static fn ($s) => self::sanitizeGeminiSchema($s),
+                    $schema[$key]
+                );
+            }
+        }
+
+        return $schema;
     }
 }

@@ -149,13 +149,18 @@ def create_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX idx_orders_customer ON fact_orders(customer_id);
         CREATE INDEX idx_orders_purchase_ts ON fact_orders(order_purchase_timestamp);
         CREATE INDEX idx_orders_status ON fact_orders(order_status);
+        CREATE INDEX idx_orders_status_ts ON fact_orders(order_status, order_purchase_timestamp);
         CREATE INDEX idx_items_order ON fact_order_items(order_id);
         CREATE INDEX idx_items_product ON fact_order_items(product_id);
         CREATE INDEX idx_items_seller ON fact_order_items(seller_id);
         CREATE INDEX idx_payments_order ON fact_order_payments(order_id);
         CREATE INDEX idx_reviews_order ON fact_order_reviews(order_id);
         CREATE INDEX idx_customer_state ON dim_customer(customer_state);
+        CREATE INDEX idx_customer_city ON dim_customer(customer_city);
+        CREATE INDEX idx_seller_state ON dim_seller(seller_state);
+        CREATE INDEX idx_seller_city ON dim_seller(seller_city);
         CREATE INDEX idx_product_category_en ON dim_product(category_name_english);
+        CREATE INDEX idx_payment_type ON fact_order_payments(payment_type);
         """
     )
 

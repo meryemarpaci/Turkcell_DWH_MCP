@@ -13,7 +13,7 @@ namespace App\Tools;
 final class LlmPayload
 {
     /** Control peeks only (probe / execute_query). */
-    public const SAMPLE_ROWS = 5;
+    public const SAMPLE_ROWS = 10;
 
     /** Analytical table: send all rows to model if ≤ this. */
     public const LLM_FULL_ROWS = 12;
@@ -24,27 +24,114 @@ final class LlmPayload
     public static function compactToolResult(string $tool, array $result): array
     {
         return match ($tool) {
-            'run_report' => self::analysisResultForLlm($result),
+            'run_report', 'analyze_kpi', 'analyze_breakdown', 'analyze_top_per_group', 'analyze_trend' =>
+                (!($result['ok'] ?? true))
+                    ? [
+                        'ok' => false,
+                        'errors' => $result['errors'] ?? ['tool failed'],
+                        'retry_hint' => $result['retry_hint'] ?? null,
+                    ]
+                    : self::analysisResultForLlm($result),
+            'list_metrics' => [
+                'ok' => $result['ok'] ?? true,
+                'metrics' => $result['metrics'] ?? [],
+                'dimensions' => $result['dimensions'] ?? [],
+                'entities' => $result['entities'] ?? [],
+                'note' => $result['note'] ?? null,
+            ],
+            'search_metrics' => [
+                'ok' => $result['ok'] ?? true,
+                'dataset_id' => $result['dataset_id'] ?? null,
+                'query' => $result['query'] ?? '',
+                'metrics' => array_slice($result['metrics'] ?? [], 0, 15),
+                'dimensions' => array_slice($result['dimensions'] ?? [], 0, 15),
+            ],
+            'search_tables' => [
+                'ok' => $result['ok'] ?? true,
+                'dataset_id' => $result['dataset_id'] ?? null,
+                'query' => $result['query'] ?? '',
+                'tables' => array_map(static function ($t) {
+                    return [
+                        'table_id' => $t['table_id'] ?? null,
+                        'domain' => $t['domain'] ?? null,
+                        'business_entity' => $t['business_entity'] ?? null,
+                        'description' => $t['description'] ?? null,
+                        'confidence' => $t['confidence'] ?? null,
+                        'column_count' => count($t['columns'] ?? []),
+                    ];
+                }, array_slice($result['tables'] ?? [], 0, 12)),
+            ],
+            'describe_table' => [
+                'ok' => $result['ok'] ?? false,
+                'table_id' => $result['table_id'] ?? null,
+                'domain' => $result['domain'] ?? null,
+                'business_entity' => $result['business_entity'] ?? null,
+                'description' => $result['description'] ?? null,
+                'candidate_pk' => $result['candidate_pk'] ?? null,
+                'columns' => array_slice($result['columns'] ?? [], 0, 40),
+                'note' => $result['note'] ?? null,
+                'errors' => $result['errors'] ?? null,
+            ],
+            'find_join_path' => [
+                'ok' => $result['ok'] ?? false,
+                'tables' => $result['tables'] ?? [],
+                'edges' => $result['edges'] ?? [],
+                'confidence' => $result['confidence'] ?? null,
+                'fan_out_risk' => $result['fan_out_risk'] ?? null,
+                'needs_confirmation' => $result['needs_confirmation'] ?? false,
+                'ask_user_hint' => $result['ask_user_hint'] ?? null,
+                'require_preaggregate' => $result['require_preaggregate'] ?? false,
+                'errors' => $result['errors'] ?? null,
+            ],
+            'register_table_semantics', 'register_join', 'register_canonical_entity' => [
+                'ok' => $result['ok'] ?? false,
+                'table_id' => $result['table_id'] ?? null,
+                'edge_id' => $result['edge_id'] ?? null,
+                'entity_type' => $result['entity_type'] ?? null,
+                'version' => $result['version'] ?? null,
+                'errors' => $result['errors'] ?? null,
+            ],
+            'describe_column', 'register_metric', 'register_dimension' => [
+                'ok' => $result['ok'] ?? false,
+                'dataset_id' => $result['dataset_id'] ?? null,
+                'metric_id' => $result['metric_id'] ?? null,
+                'dimension_id' => $result['dimension_id'] ?? null,
+                'version' => $result['version'] ?? null,
+                'table' => $result['table'] ?? null,
+                'column' => $result['column'] ?? null,
+                'type' => $result['type'] ?? null,
+                'approx_cardinality' => $result['approx_cardinality'] ?? null,
+                'samples' => isset($result['samples']) ? array_slice($result['samples'], 0, 8) : null,
+                'suggestion' => $result['suggestion'] ?? null,
+                'expression' => $result['expression'] ?? null,
+                'expr' => $result['expr'] ?? null,
+                'note' => $result['note'] ?? null,
+                'errors' => $result['errors'] ?? null,
+                'skipped' => $result['skipped'] ?? null,
+            ],
             'execute_query' => [
                 'ok' => $result['ok'] ?? false,
                 'columns' => $result['columns'] ?? [],
                 'row_count' => $result['row_count'] ?? 0,
                 'truncated' => $result['truncated'] ?? false,
+                'execution_mode' => $result['execution_mode'] ?? 'peek',
+                'full_data_scan' => false,
                 'errors' => $result['errors'] ?? null,
                 'warnings' => $result['warnings'] ?? null,
                 'delivery' => 'ui_none',
-                'note' => 'Control peek metadata only — raw rows stay in tool logs/UI path. Prefer run_report.',
+                'note' => 'Peek metadata only. Use analyze_* for full-data analysis.',
             ],
             'list_schema' => self::compactSchemaList($result),
             'probe_join', 'probe_filter' => [
                 'ok' => $result['ok'] ?? false,
                 'row_count' => $result['row_count'] ?? 0,
+                'execution_mode' => 'peek',
                 'errors' => $result['errors'] ?? null,
                 'warnings' => $result['warnings'] ?? null,
                 'sql_used' => isset($result['sql_used'])
                     ? mb_substr((string) $result['sql_used'], 0, 240)
                     : null,
-                'note' => 'Probe: COUNT only for the model (sample not forwarded).',
+                'note' => 'Probe metadata only.',
             ],
             default => $result,
         };
@@ -71,6 +158,8 @@ final class LlmPayload
         $columns = $table['columns'] ?? [];
         $rowCount = (int) ($result['meta']['row_count'] ?? count($rows));
         $delivery = (string) ($result['delivery'] ?? self::inferDelivery($type, $rowCount));
+        $mode = (string) ($result['meta']['execution_mode'] ?? '');
+        $fullScan = (bool) ($result['meta']['full_data_scan'] ?? false);
 
         $base = [
             'ok' => $result['ok'] ?? false,
@@ -82,6 +171,9 @@ final class LlmPayload
                 'row_count' => $rowCount,
                 'truncated' => (bool) ($result['meta']['truncated'] ?? false),
                 'columns' => $columns,
+                'execution_mode' => $mode !== '' ? $mode : null,
+                'full_data_scan' => $fullScan,
+                'warnings' => $result['meta']['warnings'] ?? null,
             ],
             'errors' => $result['errors'] ?? null,
         ];
@@ -90,21 +182,68 @@ final class LlmPayload
         if ($delivery === 'ui_only' || $type === 'browse') {
             return $base + [
                 'kpi' => [],
-                'note' => 'Full result is shown only in the UI table. '
-                    . 'Tell the user the grid is ready (row_count/columns). Do not invent row values.',
+                'note' => 'UI sample grid ready (meta only). Not a full-data dump.',
             ];
         }
 
         $base['kpi'] = array_slice($result['kpi'] ?? [], 0, 8);
 
+        // Full-data ranking tools: narrate rollups (all entities), not densified head rows.
+        if (($result['rollup'] ?? null) !== null && is_array($result['rollup'])) {
+            $base['rollup'] = $result['rollup'];
+            $base['meta']['partition_by'] = $result['meta']['partition_by'] ?? null;
+            $base['meta']['rank_dimension'] = $result['meta']['rank_dimension'] ?? null;
+            $base['meta']['entities_ranked'] = $rowCount;
+            if (isset($result['presentation_table'])) {
+                $ptRows = $result['presentation_table']['rows'] ?? [];
+                $shown = min(30, is_array($ptRows) ? count($ptRows) : 0);
+                $base['presentation_table'] = [
+                    'columns' => $result['presentation_table']['columns'] ?? [],
+                    'rows' => array_slice($ptRows, 0, $shown),
+                    'label' => $result['presentation_table']['label'] ?? null,
+                    'shown' => $shown,
+                    'omitted' => max(0, $rowCount - $shown),
+                    'and_more' => self::andMoreLabel($rowCount, $shown),
+                ];
+            }
+            $base['note'] = 'FULL-DATA result: narrate from rollup + kpi (covers all '
+                . $rowCount . ' entities)'
+                . ($rowCount > 30 ? '; ' . self::andMoreLabel($rowCount, 30) : '')
+                . '. Do not treat example rows as the whole analysis.';
+            if ($rows !== []) {
+                $base['examples'] = [
+                    'columns' => $columns,
+                    'rows' => array_slice($rows, 0, 5),
+                ];
+            }
+            return $base;
+        }
+
+        if (!empty($result['presentation_table']['rows']) && ($result['presentation'] ?? '') === 'top_entities') {
+            $base['presentation'] = 'top_entities';
+            $shown = min(25, count($result['presentation_table']['rows']));
+            $total = (int) ($result['meta']['groups_total'] ?? $rowCount);
+            $base['presentation_table'] = [
+                'columns' => $result['presentation_table']['columns'] ?? $columns,
+                'rows' => array_slice($result['presentation_table']['rows'], 0, $shown),
+                'shown' => $shown,
+                'omitted' => max(0, $total - $shown),
+                'and_more' => self::andMoreLabel($total, $shown),
+            ];
+            $base['meta']['groups_total'] = $total;
+            $base['note'] = 'Top entities after full-data aggregation. Narrate ranked rows + kpi'
+                . ($total > $shown ? '; ' . self::andMoreLabel($total, $shown) : '') . '.';
+            return $base;
+        }
+
         if ($type === 'trend' || ($result['series'] ?? []) !== []) {
             $base['series_summary'] = self::summarizeSeries($result['series'] ?? []);
-            $base['note'] = 'Chart is in UI. Narrate from series_summary + kpi only.';
+            $base['note'] = 'Tool summary from warehouse execution. Narrate series_summary + kpi.';
             return $base;
         }
 
         if ($type === 'kpi') {
-            $base['note'] = 'Snapshot KPIs from PHP. Narrate these figures only.';
+            $base['note'] = 'KPI from warehouse tool execution. Narrate these figures only.';
             return $base;
         }
 
@@ -120,27 +259,39 @@ final class LlmPayload
         }
 
         if ($rowCount <= self::LLM_FULL_ROWS) {
-            // Small analytical result: send all rows — meaningful, still tiny.
             $base['table'] = [
                 'columns' => $columns,
                 'rows' => array_slice($rows, 0, $rowCount),
                 'mode' => 'full',
+                'shown' => $rowCount,
+                'omitted' => 0,
             ];
-            $base['note'] = 'Small analytical result — full rows included. Narrate accurately.';
+            $base['note'] = 'Compact aggregate result from tool.';
             return $base;
         }
 
-        // Larger analytical result: densify (head + tail + stats), not a misleading tiny peek.
+        $shown = self::LLM_DENSE_ROWS;
         $base['table'] = [
             'columns' => $columns,
-            'rows_head' => array_slice($rows, 0, self::LLM_DENSE_ROWS),
-            'rows_tail' => array_slice($rows, -2),
-            'mode' => 'densified',
+            'rows' => array_slice($rows, 0, $shown),
+            'mode' => 'top_n',
+            'shown' => $shown,
+            'omitted' => max(0, $rowCount - $shown),
+            'and_more' => self::andMoreLabel($rowCount, $shown),
             'ui_row_count' => count($rows),
         ];
-        $base['note'] = 'Densified analytical summary. Full grid may also be in UI. '
-            . 'Do not invent middle rows; use stats + head/tail.';
+        $base['note'] = 'top_n tool summary (warehouse already scanned full filtered data). '
+            . self::andMoreLabel($rowCount, $shown) . '.';
         return $base;
+    }
+
+    private static function andMoreLabel(int $total, int $shown): string
+    {
+        $left = max(0, $total - $shown);
+        if ($left <= 0) {
+            return '';
+        }
+        return "ve {$left} tane daha";
     }
 
     public static function inferDelivery(string $reportType, int $rowCount): string

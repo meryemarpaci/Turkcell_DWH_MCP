@@ -65,6 +65,22 @@
       console.log(`%c⚙ Araç: ${entry.tool}`, "color:#b08968;font-weight:700", t);
       if (entry.sql) console.log("%cSQL", "font-weight:600", entry.sql);
       else if (entry.args) console.log("args", entry.args);
+    } else if (stage === "mcp_request") {
+      console.log(
+        `%c→ MCP: ${entry.tool}`,
+        "color:#7c5cbf;font-weight:700",
+        entry.endpoint,
+        entry.args_keys?.length ? `(${entry.args_keys.join(", ")})` : ""
+      );
+    } else if (stage === "mcp_response") {
+      console.log(
+        `%c← MCP: ${entry.tool}`,
+        "color:#2e86ab;font-weight:700",
+        entry.ok === false ? "HATA" : "ok",
+        `${entry.elapsed_ms}ms`
+      );
+    } else if (stage === "mcp_error") {
+      console.warn(`%c✗ MCP hata: ${entry.tool}`, "color:#c0392b;font-weight:700", entry.error, `${entry.elapsed_ms}ms`);
     } else if (stage === "tool_result") {
       console.log(
         `%c✓ Sonuç: ${entry.tool}`,
@@ -268,58 +284,56 @@
   }
 
   function seriesFromReport(r) {
-    // Only chart when the agent explicitly chose a trend report with series
-    if ((r.report_type || "") !== "trend") return [];
     if (!Array.isArray(r.series) || !r.series.length) return [];
-    return r.series.filter((s) => (s.points || []).length >= 2).slice(0, 2);
+    const type = (r.report_type || "").toLowerCase();
+    const kind = (r.chart_kind || "").toLowerCase();
+    // Trends + explicit bar breakdowns
+    if (type === "trend" || kind === "bar" || r.presentation === "top_entities") {
+      return r.series.filter((s) => (s.points || []).length >= 2).slice(0, 2);
+    }
+    return [];
   }
 
   function renderChartBlock(r, chartId) {
     const series = seriesFromReport(r);
-    if (!series.length) return { html: "", series: null, chartId: null };
+    if (!series.length) return { html: "", series: null, chartId: null, chartKind: "line" };
     return {
       html: `<div class="chart-wrap"><canvas id="${chartId}" height="160"></canvas></div>`,
       series,
       chartId,
+      chartKind: (r.chart_kind || "line").toLowerCase() === "bar" ? "bar" : "line",
     };
   }
 
   function mountCharts(root, jobs) {
     if (!jobs.length || typeof Chart === "undefined") return;
-    jobs.forEach(({ chartId, series }) => {
+    jobs.forEach(({ chartId, series, chartKind }) => {
       const canvas = root.querySelector("#" + chartId);
       if (!canvas || !series?.length) return;
       const labels = series[0].points.map((p) => p.x);
       const colors = ["#1f6b4a", "#b08968"];
+      const isBar = chartKind === "bar";
       new Chart(canvas, {
-        type: "line",
+        type: isBar ? "bar" : "line",
         data: {
           labels,
           datasets: series.map((s, i) => ({
             label: s.name,
             data: s.points.map((p) => p.y),
             borderColor: colors[i % colors.length],
-            backgroundColor: "transparent",
-            tension: 0.25,
-            pointRadius: 3,
+            backgroundColor: isBar ? colors[i % colors.length] + "cc" : "transparent",
+            tension: isBar ? 0 : 0.25,
+            pointRadius: isBar ? 0 : 2,
             borderWidth: 2,
-            yAxisID: i === 0 ? "y" : "y1",
           })),
         },
         options: {
           responsive: true,
           maintainAspectRatio: false,
-          interaction: { mode: "index", intersect: false },
-          plugins: {
-            legend: { position: "bottom", labels: { boxWidth: 10, font: { size: 11 } } },
-          },
+          plugins: { legend: { display: series.length > 1 } },
           scales: {
-            y: { position: "left", grid: { color: "rgba(0,0,0,0.06)" } },
-            y1: {
-              position: "right",
-              display: series.length > 1,
-              grid: { drawOnChartArea: false },
-            },
+            x: { ticks: { maxRotation: 45, autoSkip: true, maxTicksLimit: 12 } },
+            y: { beginAtZero: true },
           },
         },
       });
@@ -353,7 +367,7 @@
         const type = (r.report_type || "").toLowerCase();
         const chartId = `chart_${Date.now()}_${idx}`;
         const chart = renderChartBlock(r, chartId);
-        if (chart.series) chartJobs.push({ chartId, series: chart.series });
+        if (chart.series) chartJobs.push({ chartId, series: chart.series, chartKind: chart.chartKind });
 
         // Compact KPI strip — skip on trend charts (series already tells the story)
         let kpiHtml = "";
@@ -370,12 +384,35 @@
             .join("")}</div>`;
         }
 
-        const table = r.table;
+        // Strategic table: prefer rollup / presentation_table over raw head rows
+        let table = null;
+        let tableLabel = "Tablo";
+        if (r.presentation_table?.columns && r.presentation_table?.rows?.length) {
+          table = r.presentation_table;
+          tableLabel = r.presentation_table.label || "Özet tablo";
+        } else if (r.rollup?.by_state?.length) {
+          table = {
+            columns: Object.keys(r.rollup.by_state[0]),
+            rows: r.rollup.by_state,
+          };
+          tableLabel = "Eyalet rollup (tüm data)";
+        } else if ((r.meta?.row_count || 0) <= 40 && r.table?.columns && r.table?.rows?.length) {
+          table = r.table;
+          tableLabel = "Tablo";
+        } else if (r.presentation === "top_entities" && r.table?.rows?.length) {
+          table = r.table;
+          tableLabel = `Top ${r.table.rows.length}${r.meta?.groups_total ? ` / ${r.meta.groups_total}` : ""}`;
+        }
+
         let tableHtml = "";
         const isBrowse = type === "browse" || r.delivery === "ui_only";
-        const showTable = !chart.series && table?.columns && table.rows?.length;
+        // If we already have a chart for this report, skip duplicate huge tables
+        const showTable =
+          table?.columns &&
+          table.rows?.length &&
+          (isBrowse || !chart.series || (table.rows.length <= 30 && type !== "trend"));
         if (showTable) {
-          const maxShow = isBrowse ? 100 : Math.min(40, table.rows.length);
+          const maxShow = isBrowse ? 100 : Math.min(30, table.rows.length);
           const rows = (table.rows || []).slice(0, maxShow);
           const head = table.columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
           const body = rows
@@ -389,7 +426,7 @@
           const total = r.meta?.row_count ?? table.rows.length;
           const label = isBrowse
             ? `Tablo · ${rows.length}/${total}`
-            : `Tablo · ${rows.length}`;
+            : `${tableLabel} · ${rows.length}${total > rows.length ? ` / ${total}` : ""}`;
           tableHtml = renderTablePanel(label, head, body);
         }
         return `

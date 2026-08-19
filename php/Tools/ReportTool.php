@@ -12,16 +12,27 @@ final class ReportTool
     {
     }
 
-    public function executeQuery(string $sql, ?int $maxRows = 200): array
+    /**
+     * @param 'auto'|'peek'|'browse'|'aggregate' $mode
+     */
+    public function executeQuery(string $sql, ?int $maxRows = null, string $mode = 'auto'): array
     {
         $check = $this->guard->validate($sql);
         if (!$check['ok']) {
             return ['ok' => false, 'errors' => $check['errors'], 'rows' => [], 'columns' => []];
         }
-        $limit = $this->guard->clampMaxRows($maxRows);
+
+        if ($mode === 'auto') {
+            $mode = ($check['is_aggregate'] ?? false) ? 'aggregate' : 'browse';
+        }
+        $limit = $this->guard->clampMaxRows($maxRows, $mode);
+        $prepared = $this->guard->prepareStatement($check['statement'], $mode);
+        $statement = $prepared['statement'];
+        $prepWarnings = $prepared['warnings'];
+
         try {
             $pdo = Database::pdo();
-            $wrapped = $this->guard->wrapWithLimit($check['statement'], $limit);
+            $wrapped = $this->guard->wrapWithLimit($statement, $limit);
             $stmt = $pdo->query($wrapped);
             $rows = $stmt->fetchAll();
             $columns = [];
@@ -35,14 +46,22 @@ final class ReportTool
                     }
                 }
             }
+            $truncated = count($rows) >= $limit;
             return [
                 'ok' => true,
                 'columns' => $columns,
                 'rows' => $rows,
                 'row_count' => count($rows),
-                'truncated' => count($rows) >= $limit,
+                'truncated' => $truncated,
                 'max_rows' => $limit,
-                'warnings' => $check['warnings'],
+                'execution_mode' => $mode,
+                // Aggregates compute over the full filtered set; LIMIT only caps returned groups.
+                'full_data_scan' => $mode === 'aggregate',
+                'stripped_sql_limit' => $prepared['stripped_limit'],
+                'warnings' => array_values(array_filter(array_merge(
+                    $check['warnings'] ?? [],
+                    $prepWarnings
+                ))),
             ];
         } catch (PDOException $e) {
             return ['ok' => false, 'errors' => [$e->getMessage()], 'rows' => [], 'columns' => []];
@@ -61,12 +80,43 @@ final class ReportTool
             $reportType = 'table';
         }
 
-        // Browse/raw listings need a higher UI cap; analytics stay modest by default.
-        if ($maxRows === null) {
-            $maxRows = $reportType === 'browse' ? 100 : 40;
+        $mode = $this->guard->resolveMode($sql, $reportType, 'report');
+        $extraWarnings = [];
+
+        // Tool contract: analysis types require aggregated SQL. Enforcement lives here,
+        // not in long prompts — model retries with proper SQL from this error.
+        if ($reportType !== 'browse' && $mode !== 'aggregate') {
+            return [
+                'ok' => false,
+                'need_aggregate' => true,
+                'errors' => [
+                    'run_report analysis requires aggregated SQL '
+                    . '(SUM/COUNT/AVG/MIN/MAX and/or GROUP BY). '
+                    . 'Raw row SELECT is not full-dataset analysis. '
+                    . 'Rewrite with aggregates, or use report_type=browse / execute_query for a small sample.',
+                ],
+                'report_id' => $reportId,
+                'report_type' => $reportType,
+                'title' => $title,
+            ];
         }
 
-        $result = $this->executeQuery($sql, $maxRows);
+        // Executor owns caps: aggregates always full-data (high group safety cap).
+        // Browse uses a small sample cap. max_rows from the model is ignored for aggregates.
+        if ($mode === 'aggregate') {
+            $cap = FullDataContract::groupCap();
+            if ($maxRows !== null && $maxRows < $cap) {
+                $extraWarnings[] = "Tool ignored max_rows={$maxRows}; aggregate run_report always scans full filtered data.";
+            }
+            $maxRows = $cap;
+        } elseif ($maxRows === null) {
+            $maxRows = match ($mode) {
+                'peek' => SqlGuard::PEEK_MAX_ROWS,
+                default => SqlGuard::BROWSE_MAX_ROWS,
+            };
+        }
+
+        $result = $this->executeQuery($sql, $maxRows, $mode);
         if (!$result['ok']) {
             return $result;
         }
@@ -140,13 +190,19 @@ final class ReportTool
 
         $uiRowCap = match ($reportType) {
             'browse' => 100,
-            'trend' => 24,
+            'trend' => min(120, count($rows)),
             'kpi' => 5,
-            default => 40,
+            'distribution' => 80,
+            default => min(80, count($rows)),
         };
-        $delivery = $reportType === 'browse' || ($reportType === 'table' && count($rows) > 25)
+        $delivery = $reportType === 'browse' || ($reportType === 'table' && $mode !== 'aggregate' && count($rows) > 25)
             ? 'ui_only'
             : 'summary';
+
+        $warnings = array_values(array_filter(array_merge(
+            $result['warnings'] ?? [],
+            $extraWarnings
+        )));
 
         return [
             'ok' => true,
@@ -165,7 +221,10 @@ final class ReportTool
                 'row_count' => $result['row_count'],
                 'truncated' => $result['truncated'],
                 'max_rows' => $result['max_rows'] ?? $maxRows,
-                'warnings' => $result['warnings'] ?? [],
+                'execution_mode' => $mode,
+                'full_data_scan' => (bool) ($result['full_data_scan'] ?? false),
+                'stripped_sql_limit' => $result['stripped_sql_limit'] ?? null,
+                'warnings' => $warnings,
             ],
         ];
     }

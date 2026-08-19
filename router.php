@@ -9,10 +9,16 @@ $uri = urldecode(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) ?: '/');
 $root = __DIR__;
 
 if (str_starts_with($uri, '/api/')) {
-    $file = $root . $uri;
-    if (is_file($file)) {
-        require $file;
-        return true;
+    // Try exact path first, then with .php extension, then slug→file mapping.
+    $candidates = [
+        $root . $uri,
+        $root . $uri . '.php',
+    ];
+    foreach ($candidates as $file) {
+        if (is_file($file)) {
+            require $file;
+            return true;
+        }
     }
     http_response_code(404);
     header('Content-Type: application/json');

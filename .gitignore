@@ -16,6 +16,8 @@ storage/sessions/*
 !storage/sessions/.gitkeep
 storage/runtime/*
 !storage/runtime/.gitkeep
+storage/registry/*
+!storage/registry/.gitkeep
 php/cache/*
 php/cacert.pem
 
@@ -25,3 +27,9 @@ Data/*.sqlite
 Data/*.db
 !Data/.gitkeep
 !Data/README.md
+
+# Node / misc
+node_modules/
+*.log
+*.swp
+*.swo

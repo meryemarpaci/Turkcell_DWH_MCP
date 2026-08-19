@@ -142,7 +142,7 @@ final class ProbeTool
         }
         try {
             $pdo = Database::pdo();
-            $limit = $this->guard->clampMaxRows(5);
+            $limit = $this->guard->clampMaxRows(SqlGuard::PEEK_MAX_ROWS, 'peek');
             $wrapped = $this->guard->wrapWithLimit($check['statement'], $limit);
             $rows = $pdo->query($wrapped)->fetchAll();
             return [
@@ -150,9 +150,10 @@ final class ProbeTool
                 'errors' => [],
                 'warnings' => $check['warnings'],
                 'row_count' => count($rows),
-                'sample' => array_slice($rows, 0, 5),
+                'sample' => array_slice($rows, 0, $limit),
                 'label' => $label,
                 'sql_used' => $check['statement'],
+                'execution_mode' => 'peek',
             ];
         } catch (PDOException $e) {
             return [

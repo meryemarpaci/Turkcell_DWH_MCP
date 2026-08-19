@@ -133,6 +133,71 @@
       "description": "Ödeme tutarı toplamı"
     }
   ],
+  "dimensions": [
+    {
+      "id": "customer_state",
+      "expr": "dim_customer.customer_state",
+      "tables": ["fact_orders", "dim_customer"],
+      "joins": ["orders_customer"]
+    },
+    {
+      "id": "customer_city",
+      "expr": "dim_customer.customer_city",
+      "tables": ["fact_orders", "dim_customer"],
+      "joins": ["orders_customer"]
+    },
+    {
+      "id": "customer_id",
+      "expr": "fact_orders.customer_id",
+      "tables": ["fact_orders"],
+      "joins": [],
+      "entity": true
+    },
+    {
+      "id": "category",
+      "expr": "dim_product.category_name_english",
+      "tables": ["fact_order_items", "dim_product", "fact_orders"],
+      "joins": ["items_orders", "items_product"]
+    },
+    {
+      "id": "product_id",
+      "expr": "fact_order_items.product_id",
+      "tables": ["fact_order_items", "fact_orders"],
+      "joins": ["items_orders"],
+      "entity": true
+    },
+    {
+      "id": "seller_id",
+      "expr": "fact_order_items.seller_id",
+      "tables": ["fact_order_items", "fact_orders"],
+      "joins": ["items_orders"],
+      "entity": true
+    },
+    {
+      "id": "seller_state",
+      "expr": "dim_seller.seller_state",
+      "tables": ["fact_order_items", "dim_seller", "fact_orders"],
+      "joins": ["items_orders", "items_seller"]
+    },
+    {
+      "id": "seller_city",
+      "expr": "dim_seller.seller_city",
+      "tables": ["fact_order_items", "dim_seller", "fact_orders"],
+      "joins": ["items_orders", "items_seller"]
+    },
+    {
+      "id": "order_status",
+      "expr": "fact_orders.order_status",
+      "tables": ["fact_orders"],
+      "joins": []
+    },
+    {
+      "id": "payment_type",
+      "expr": "fact_order_payments.payment_type",
+      "tables": ["fact_order_payments", "fact_orders"],
+      "joins": ["payments_orders"]
+    }
+  ],
   "table_descriptions": {
     "dim_customer": "Müşteri boyutu: id, unique id, zip, şehir, eyalet (customer_state)",
     "dim_product": "Ürün boyutu: kategori PT/EN, boyut/ağırlık",

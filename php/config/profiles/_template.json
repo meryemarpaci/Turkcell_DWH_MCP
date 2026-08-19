@@ -7,6 +7,15 @@
   "allowed_tables": [],
   "joins": [],
   "metrics": [],
+  "dimensions": [
+    {
+      "id": "example_dim",
+      "expr": "dim_example.column",
+      "tables": ["fact_example", "dim_example"],
+      "joins": ["example_join"],
+      "entity": false
+    }
+  ],
   "calendar": {
     "fact_table": "",
     "date_column": "",

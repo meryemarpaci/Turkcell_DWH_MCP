@@ -4,6 +4,11 @@ declare(strict_types=1);
 
 namespace App;
 
+use App\Mcp\DwhToolRegistry;
+use App\Mcp\McpClient;
+use App\Discovery\QueryPlanner;
+use App\Semantic\RegistryStore;
+use App\Semantic\SchemaChecker;
 use App\Tools\LlmPayload;
 use App\Tools\ProbeTool;
 use App\Tools\ReportTool;
@@ -18,6 +23,8 @@ final class AgentOrchestrator
     private LlmEngine $llm;
     private SessionStore $sessions;
     private AgentLog $log;
+    private McpClient $mcpClient;
+    private bool $mcpLocalFallback = true;
 
     public function __construct(?LlmEngine $llm = null, ?callable $onProgress = null)
     {
@@ -28,6 +35,14 @@ final class AgentOrchestrator
         $this->llm = $llm ?? new GeminiEngine();
         $this->sessions = new SessionStore();
         $this->log = new AgentLog($onProgress);
+        $mcpBase = app_env('MCP_ENDPOINT', 'http://localhost:8081/api/mcp');
+        $mcpTimeout = (int) (app_env('MCP_TIMEOUT_SECONDS', '300') ?? 300);
+        $this->mcpClient = new McpClient((string) $mcpBase, max(60, $mcpTimeout));
+        $this->mcpLocalFallback = !in_array(
+            strtolower((string) (app_env('MCP_LOCAL_FALLBACK', '1') ?? '1')),
+            ['0', 'false', 'no', 'off'],
+            true
+        );
     }
 
     public function handle(string $sessionId, string $message): array
@@ -39,6 +54,21 @@ final class AgentOrchestrator
         ]);
 
         $state = $this->sessions->load($sessionId);
+        $datasetId = (string) ($state['dataset_id'] ?? DatasetProfile::id());
+        if ($datasetId === '') {
+            $datasetId = DatasetProfile::id();
+        }
+        $state['dataset_id'] = $datasetId;
+        RegistryStore::setActiveDataset($datasetId);
+        DwhToolRegistry::setActiveDataset($datasetId);
+
+        // Cheap discovery bootstrap (profile + join graph if empty) — no LLM
+        try {
+            (new QueryPlanner())->bootstrap();
+        } catch (\Throwable $e) {
+            $this->log->add('discovery_bootstrap_error', ['error' => $e->getMessage()]);
+        }
+
         $msgs = $state['messages'] ?? [];
         $last = $msgs !== [] ? $msgs[array_key_last($msgs)] : null;
         $already = is_array($last)
@@ -59,11 +89,12 @@ final class AgentOrchestrator
         $collectedReports = [];
         $clarify = null;
         $trace = [];
-        $maxSteps = 4;
-        $maxReports = 2; // prefer 1; hard cap 2
+        $maxSteps = 8;
+        $maxReports = 5; // multiple analyze_* tools allowed
         $finalText = '';
         $llmCalls = 0;
         $emptyReportRetries = 0;
+        $analysisTools = ['analyze_kpi', 'analyze_breakdown', 'analyze_top_per_group', 'analyze_trend'];
 
         for ($step = 0; $step < $maxSteps; $step++) {
             $this->log->add('llm_request', [
@@ -168,7 +199,7 @@ final class AgentOrchestrator
                     $compact = [
                         'ok' => false,
                         'suppressed' => true,
-                        'instruction' => 'Do NOT ask the user. Use DATA CALENDAR ranges and call run_report now '
+                        'instruction' => 'Do NOT ask the user. Use DATA CALENDAR ranges and call analyze_kpi / analyze_breakdown / analyze_trend now '
                             . "(geçen ay = {$calendar['prev_month_start']}..{$calendar['prev_month_end']}; "
                             . "bu ay = {$calendar['latest_month_start']}..{$calendar['latest_month_end']}"
                             . ($aliasHint !== '' ? "; e.g. {$aliasHint}" : '')
@@ -178,7 +209,7 @@ final class AgentOrchestrator
                 } elseif ($name === 'ask_user') {
                     $clarify = $result;
                 }
-                if ($name === 'run_report' && ($result['ok'] ?? false)) {
+                if (in_array($name, $analysisTools, true) && ($result['ok'] ?? false)) {
                     $collectedReports[] = $result;
                     $rowCount = (int) ($result['meta']['row_count'] ?? count($result['table']['rows'] ?? []));
                     $kpiZero = true;
@@ -193,25 +224,28 @@ final class AgentOrchestrator
                         $cal = DataCalendar::info();
                         $defaults = DatasetProfile::defaults();
                         $status = trim((string) ($defaults['status_filter_sql'] ?? ''));
-                        $compact['zero_result_hint'] = 'Query returned empty/zero. Retry run_report ONCE with '
-                            . "geçen ay = {$cal['prev_month_start']}..{$cal['prev_month_end']} "
-                            . "or bu ay = {$cal['latest_month_start']}..{$cal['latest_month_end']}"
-                            . ($status !== '' ? ", {$status}" : '')
-                            . '. Use profile aliases. Do not probe.';
+                        $compact['zero_result_hint'] = 'Query returned empty/zero. Retry analyze_* ONCE with '
+                            . "date_from/date_to = geçen ay {$cal['prev_month_start']}..{$cal['prev_month_end']} "
+                            . "or bu ay {$cal['latest_month_start']}..{$cal['latest_month_end']}"
+                            . ($status !== '' ? ", keep default status" : '')
+                            . '. Use profile aliases in filters.';
                         array_pop($collectedReports);
                         $this->log->add('empty_report_retry_hint', [
                             'hint' => $compact['zero_result_hint'],
                         ]);
                     } elseif (count($collectedReports) >= $maxReports) {
-                        $compact['stop_hint'] = 'Report budget reached. Do NOT call more tools — write the Turkish answer now.';
+                        $compact['stop_hint'] = 'Analysis budget reached. Write the Turkish answer from tool summaries now.';
                         $this->log->add('reports_cap_reached', ['count' => count($collectedReports)]);
-                    } elseif (count($collectedReports) === 1) {
-                        $compact['next_hint'] = 'You already have a report. Prefer answering NOW. '
-                            . 'Only call run_report once more if a clearly different grain is still missing '
-                            . '(e.g. ranking vs trend). Do NOT fetch an extra month for comparison unless the user asked.';
                     } else {
-                        $compact['next_hint'] = 'Prefer a single run_report; answer when enough.';
+                        $compact['next_hint'] = 'Tool ran on full filtered data. Call another analyze_* if needed, else answer.';
                     }
+                } elseif (!($result['ok'] ?? true)) {
+                    $compact['retry_hint'] = $result['retry_hint']
+                        ?? ((string) ($result['errors'][0] ?? 'Fix tool args using search_metrics and retry.'));
+                    $this->log->add('tool_retry_hint', [
+                        'tool' => $name,
+                        'hint' => $compact['retry_hint'],
+                    ]);
                 }
 
                 $messages[] = [
@@ -338,6 +372,23 @@ final class AgentOrchestrator
         }
         $parts[] = $calendar;
         $parts[] = $schema;
+
+        // Cheap schema-check (no LLM): surface new unregistered columns only.
+        try {
+            $check = (new SchemaChecker())->check(RegistryStore::datasetId());
+            $note = trim((string) ($check['prompt_note'] ?? ''));
+            if ($note !== '') {
+                $parts[] = "# SCHEMA CHECK\n" . $note;
+            }
+            $this->log->add('schema_check', [
+                'dataset_id' => $check['dataset_id'] ?? null,
+                'changed' => $check['changed'] ?? false,
+                'unregistered' => count($check['unregistered_columns'] ?? []),
+            ]);
+        } catch (\Throwable $e) {
+            $this->log->add('schema_check_error', ['error' => $e->getMessage()]);
+        }
+
         return implode("\n\n", $parts);
     }
 
@@ -370,8 +421,8 @@ final class AgentOrchestrator
     {
         $nudge = [
             'role' => 'user',
-            'content' => 'Yukarıdaki araç sonuçlarına dayanarak kullanıcıya Türkçe, kısa yanıt yaz. '
-                . 'Ham tablo dökümü isteme/yazma; yalnızca KPI ve örnek satırları kullan.',
+            'content' => 'Yukarıdaki araç özetlerine göre Türkçe, kısa yanıt yaz. '
+                . 'Sadece tool sonucundaki KPI/özeti kullan; ham tablo uydurma.',
         ];
         if ($reports !== []) {
             $nudge['content'] .= "\n\nRAPOR_JSON:\n"
@@ -580,172 +631,77 @@ final class AgentOrchestrator
 
     private function toolDeclarations(): array
     {
-        return [
-            [
-                'name' => 'list_schema',
-                'description' => 'List DWH tables/columns (optional subset). Prefer using boot schema; call if need refresh.',
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'tables' => [
-                            'type' => 'array',
-                            'items' => ['type' => 'string'],
-                            'description' => 'Optional table name filter',
-                        ],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'propose_tables',
-                'description' => 'Heuristic table suggestions from intent text',
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'intent_hint' => ['type' => 'string'],
-                    ],
-                    'required' => ['intent_hint'],
-                ],
-            ],
-            [
-                'name' => 'probe_join',
-                'description' => 'OPTIONAL control check — only if join correctness is uncertain. '
-                    . 'COUNT + up to 5 sample rows. Do NOT call on every request; prefer direct run_report.',
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'join_ids' => [
-                            'type' => 'array',
-                            'items' => ['type' => 'string'],
-                        ],
-                        'sql' => [
-                            'type' => 'string',
-                            'description' => 'Optional custom probe SQL instead of join_ids builder',
-                        ],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'probe_filter',
-                'description' => 'OPTIONAL control check — only if filter population is uncertain. '
-                    . 'COUNT + up to 5 sample rows. Skip when defaults are clear; go to run_report.',
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'sql' => ['type' => 'string'],
-                    ],
-                    'required' => ['sql'],
-                ],
-            ],
-            [
-                'name' => 'run_report',
-                'description' => 'Run ONE analytical SQL (prefer a single call per user question). '
-                    . 'Put joins/filters/SUM|AVG|MIN|MAX|COUNT|GROUP BY in SQL. '
-                    . 'Combine grains in one query when possible (e.g. daily trend via GROUP BY day; '
-                    . 'do not add extra months unless user asked to compare). '
-                    . 'PHP returns compact summary; UI gets chart/table. '
-                    . 'report_type: kpi|trend|table|distribution|browse.',
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'sql' => ['type' => 'string'],
-                        'report_type' => [
-                            'type' => 'string',
-                            'description' => 'kpi|trend|table|distribution|browse — browse = UI-only row grid',
-                        ],
-                        'report_id' => ['type' => 'string'],
-                        'title' => ['type' => 'string'],
-                        'max_rows' => [
-                            'type' => 'integer',
-                            'description' => 'Fetch/UI cap (browse up to 100; analytics typically 20–40)',
-                        ],
-                    ],
-                    'required' => ['sql'],
-                ],
-            ],
-            [
-                'name' => 'execute_query',
-                'description' => 'OPTIONAL control — rare. Metadata/COUNT style checks only; rows not sent to model.',
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'sql' => ['type' => 'string'],
-                        'max_rows' => ['type' => 'integer', 'description' => 'Max 5 (control peek)'],
-                    ],
-                    'required' => ['sql'],
-                ],
-            ],
-            [
-                'name' => 'ask_user',
-                'description' => 'RARE. Only if the user message has no analyzable intent (greeting only). '
-                    . 'Do NOT use when date/geo/metric cues are already present — resolve via DATA CALENDAR + profile aliases.',
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'message' => ['type' => 'string'],
-                        'questions' => [
-                            'type' => 'array',
-                            'items' => ['type' => 'string'],
-                        ],
-                        'filter_suggestions' => [
-                            'type' => 'array',
-                            'items' => [
-                                'type' => 'object',
-                                'properties' => [
-                                    'field' => ['type' => 'string'],
-                                    'label' => ['type' => 'string'],
-                                    'example' => ['type' => 'string'],
-                                ],
-                            ],
-                        ],
-                    ],
-                    'required' => ['message'],
-                ],
-            ],
-        ];
+        return DwhToolRegistry::toolSchemas();
     }
 
     private function dispatchTool(string $name, array $args): array
     {
-        return match ($name) {
-            'list_schema' => $this->schemaTool->listSchema(
-                isset($args['tables']) && is_array($args['tables']) ? $args['tables'] : null
-            ),
-            'propose_tables' => $this->schemaTool->proposeTables((string) ($args['intent_hint'] ?? '')),
-            'probe_join' => $this->probeTool->probeJoin(
-                isset($args['join_ids']) && is_array($args['join_ids']) ? $args['join_ids'] : [],
-                isset($args['sql']) ? (string) $args['sql'] : null
-            ),
-            'probe_filter' => $this->probeTool->probeFilter((string) ($args['sql'] ?? '')),
-            'run_report' => $this->reportTool->runReport(
-                (string) ($args['sql'] ?? ''),
-                (string) ($args['report_type'] ?? 'table'),
-                (string) ($args['report_id'] ?? 'report'),
-                (string) ($args['title'] ?? 'Report'),
-                $this->resolveMaxRows($args)
-            ),
-            'execute_query' => $this->reportTool->executeQuery(
-                (string) ($args['sql'] ?? ''),
-                isset($args['max_rows']) ? min(5, (int) $args['max_rows']) : 5
-            ),
-            'ask_user' => [
-                'ok' => true,
-                'message' => (string) ($args['message'] ?? ''),
-                'questions' => $args['questions'] ?? [],
-                'filter_suggestions' => $args['filter_suggestions'] ?? SemanticConfig::all()['filter_hints'] ?? [],
-            ],
-            default => ['ok' => false, 'errors' => ["Unknown tool: $name"]],
-        };
+        $t = microtime(true);
+        $endpoint = app_env('MCP_ENDPOINT', 'http://localhost:8081/api/mcp');
+        if (!isset($args['dataset_id']) || trim((string) $args['dataset_id']) === '') {
+            $args['dataset_id'] = RegistryStore::datasetId();
+        }
+        $this->log->add('mcp_request', [
+            'tool' => $name,
+            'endpoint' => $endpoint,
+            'dataset_id' => $args['dataset_id'],
+            'args_keys' => array_keys($args),
+        ]);
+        try {
+            $result = $this->mcpClient->callTool($name, $args);
+            $this->log->add('mcp_response', [
+                'tool' => $name,
+                'ok' => $result['ok'] ?? true,
+                'elapsed_ms' => (int) round((microtime(true) - $t) * 1000),
+                'via' => 'http',
+            ]);
+            return $result;
+        } catch (\RuntimeException $e) {
+            $this->log->add('mcp_error', [
+                'tool' => $name,
+                'error' => $e->getMessage(),
+                'elapsed_ms' => (int) round((microtime(true) - $t) * 1000),
+            ]);
+            // Transport-only fallback (MCP down). Prefer fixing SQL/time limits so HTTP succeeds.
+            if ($this->mcpLocalFallback && $this->isTransportFailure($e->getMessage())) {
+                $t2 = microtime(true);
+                try {
+                    $result = DwhToolRegistry::dispatch($name, $args);
+                    $this->log->add('mcp_local_fallback', [
+                        'tool' => $name,
+                        'ok' => $result['ok'] ?? true,
+                        'elapsed_ms' => (int) round((microtime(true) - $t2) * 1000),
+                        'reason' => $e->getMessage(),
+                    ]);
+                    return $result;
+                } catch (\Throwable $inner) {
+                    return [
+                        'ok' => false,
+                        'errors' => [
+                            $e->getMessage(),
+                            'Local fallback failed: ' . $inner->getMessage(),
+                        ],
+                        'retry_hint' => 'MCP server unreachable — ensure `php -S localhost:8081 mcp_router.php` is running, or rely on local fallback.',
+                    ];
+                }
+            }
+            return [
+                'ok' => false,
+                'errors' => [$e->getMessage()],
+                'retry_hint' => 'MCP transport failed. Retry analyze_* once; if it persists, restart MCP on :8081.',
+            ];
+        }
     }
 
-    /** @param array<string,mixed> $args */
-    private function resolveMaxRows(array $args): ?int
+    private function isTransportFailure(string $message): bool
     {
-        $type = strtolower((string) ($args['report_type'] ?? 'table'));
-        $hard = $type === 'browse' ? 100 : 100;
-        if (!isset($args['max_rows'])) {
-            return $type === 'browse' ? 100 : 40;
-        }
-        return max(1, min($hard, (int) $args['max_rows']));
+        $m = strtolower($message);
+        return str_contains($m, 'could not reach')
+            || str_contains($m, 'transport error')
+            || str_contains($m, 'invalid json')
+            || str_contains($m, 'failed to open stream')
+            || str_contains($m, 'connection refused')
+            || str_contains($m, 'timed out');
     }
 
     /** True when the user already gave enough cues to analyze without asking. */
